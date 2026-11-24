@@ -301,26 +301,60 @@ async function getEvmBlockTimestamp(rt: Runtime, blockchain: EvmBlockchain, bloc
 
 // ---------- Bitcoin (Esplora) ----------
 
-interface EsploraTxStatus {
-  confirmed: boolean;
-  block_height?: number;
-  block_time?: number;
-}
-
-interface EsploraVin {
-  prevout: { scriptpubkey_address?: string; value: number } | null;
-}
-
-interface EsploraVout {
-  scriptpubkey_address?: string;
+// The fields of a confirmed Esplora transaction the balance calculation
+// reads, after validation (see parseEsploraPage).
+interface EsploraOutput {
+  address: string | undefined;
   value: number;
 }
 
 interface EsploraTx {
   txid: string;
-  status: EsploraTxStatus;
-  vin: EsploraVin[];
-  vout: EsploraVout[];
+  blockHeight: number;
+  // Outputs paid by this TX, and the previous outputs its inputs spend
+  // (none for a coinbase input).
+  vout: EsploraOutput[];
+  prevouts: EsploraOutput[];
+}
+
+const INVALID_HISTORY = "Invalid response from the Bitcoin data provider while reading the address history";
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+const isSats = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+function parseOutput(v: unknown): EsploraOutput {
+  if (!isRecord(v) || !isSats(v.value)) throw new Error(INVALID_HISTORY);
+  const address = v.scriptpubkey_address;
+  if (address !== undefined && typeof address !== "string") throw new Error(INVALID_HISTORY);
+  return { address, value: v.value };
+}
+
+// Validates one page of /address/{a}/txs/chain: every value the calculation
+// reads must be present and well-formed (amounts as non-negative safe
+// integers of satoshis), otherwise the page is rejected as a whole — a
+// malformed amount must never turn into NaN or a concatenated string.
+function parseEsploraPage(data: unknown): EsploraTx[] {
+  if (!Array.isArray(data)) throw new Error(INVALID_HISTORY);
+  return data.map((tx): EsploraTx => {
+    if (!isRecord(tx) || typeof tx.txid !== "string" || !tx.txid || !isRecord(tx.status)) {
+      throw new Error(INVALID_HISTORY);
+    }
+    if (tx.status.confirmed !== true) {
+      throw new Error("Esplora returned an unconfirmed transaction in the confirmed history");
+    }
+    const height = tx.status.block_height;
+    if (typeof height !== "number" || !Number.isSafeInteger(height) || height < 0) {
+      throw new Error(INVALID_HISTORY);
+    }
+    if (!Array.isArray(tx.vout) || !Array.isArray(tx.vin)) throw new Error(INVALID_HISTORY);
+    const prevouts: EsploraOutput[] = [];
+    for (const input of tx.vin) {
+      if (!isRecord(input)) throw new Error(INVALID_HISTORY);
+      // Coinbase inputs spend no previous output (prevout null).
+      if (input.prevout !== null && input.prevout !== undefined) prevouts.push(parseOutput(input.prevout));
+    }
+    return { txid: tx.txid, blockHeight: height, vout: tx.vout.map(parseOutput), prevouts };
+  });
 }
 
 interface EsploraChainStats {
@@ -441,18 +475,14 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
     const url = lastSeenTxid
       ? `${rt.esploraBase}/address/${walletAddress}/txs/chain/${lastSeenTxid}`
       : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
-    const page = (await esploraAddressJson(rt, url, walletAddress)) as EsploraTx[];
-    if (!Array.isArray(page)) throw new Error("Invalid Esplora transaction list response");
+    const page = parseEsploraPage(await esploraAddressJson(rt, url, walletAddress));
     pages++;
     if (pages % ESPLORA_PROGRESS_EVERY_PAGES === 0) {
       rt.log(`Bitcoin history: ${pages} pages (${pages * ESPLORA_PAGE_SIZE} transactions) read`);
     }
 
     for (const tx of page) {
-      const height = tx.status.block_height;
-      if (!tx.status.confirmed || height === undefined) {
-        throw new Error("Esplora returned an unconfirmed transaction in the confirmed history");
-      }
+      const height = tx.blockHeight;
       // The early stop below is only correct for newest-first order; refuse
       // to compute anything if the provider ever returns another order.
       if (height > previousHeight) {
@@ -462,10 +492,10 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
       if (height <= targetHeight) return finish();
 
       for (const out of tx.vout) {
-        if (out.scriptpubkey_address === walletAddress) net += out.value;
+        if (out.address === walletAddress) net += out.value;
       }
-      for (const inp of tx.vin) {
-        if (inp.prevout?.scriptpubkey_address === walletAddress) net -= inp.prevout.value;
+      for (const prev of tx.prevouts) {
+        if (prev.address === walletAddress) net -= prev.value;
       }
     }
 
@@ -505,6 +535,9 @@ async function fetchBitcoinBalance(
     }
 
     const satsBalance = before.funded_txo_sum - before.spent_txo_sum - netAfter;
+    // All terms are validated safe integers; this also guards the arithmetic
+    // so that no NaN or rounded value can ever be formatted into a report.
+    if (!Number.isSafeInteger(satsBalance)) throw new Error(INVALID_HISTORY);
     if (satsBalance < 0) {
       throw new Error("Computed negative Bitcoin balance — chain data inconsistent");
     }
