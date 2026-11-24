@@ -519,11 +519,12 @@ async function fetchBitcoinBalance(
 // the raw status code leaked into the UI before this client-side check.
 const BTC_GENESIS_TIMESTAMP = 1230940800;
 
-// Bitcoin block timestamps may lag the real time: a block mined after the
-// target instant can still carry an earlier timestamp (consensus only needs
-// it above the median of the last 11 blocks; in practice the deviation stays
-// within the 2-hour rule). The block at or before an instant is therefore
-// only final 2 hours after it.
+// Bitcoin block timestamps can lag real time: a block mined after the
+// target instant can still carry an earlier timestamp. Consensus only needs
+// it above the median of the last 11 blocks (the 2-hour rule bounds how far
+// a timestamp may run ahead, not behind), so there is no protocol limit; in
+// practice the lag stays well under 2 hours. The block at or before an
+// instant is therefore only treated as final 2 hours after it.
 const BTC_TIMESTAMP_SAFETY_MS = 2 * 60 * 60 * 1000;
 
 async function findBtcBlockByTimestamp(rt: Runtime, targetTimestamp: number): Promise<number> {
@@ -536,8 +537,9 @@ async function findBtcBlockByTimestamp(rt: Runtime, targetTimestamp: number): Pr
   if (Date.now() < finalAt) {
     const at = new Date(finalAt).toISOString().slice(0, 16).replace("T", " ");
     throw new Error(
-      `The Bitcoin balance for this instant is not final yet: block timestamps may lag by up to 2 hours, ` +
-        `so a block mined later can still belong to it. Try again after ${at} UTC.`,
+      `The Bitcoin balance for this instant is not final yet: block timestamps can lag real time ` +
+        `(in practice by well under 2 hours), so a block mined later can still belong to it. ` +
+        `Bitcoin snapshots are only reported 2 hours after the instant; try again after ${at} UTC.`,
     );
   }
 
