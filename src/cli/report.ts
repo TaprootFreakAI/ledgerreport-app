@@ -84,6 +84,8 @@ interface RawRequest {
 
 interface SuppliedPrice {
   value: number;
+  // The validated input exactly as given, printed and summarised unchanged.
+  text: string;
   source: string;
 }
 
@@ -104,7 +106,8 @@ interface ReportResult {
   assetType: string;
   blockNumber: number;
   balance: string;
-  price: number;
+  // As written to summary.csv and stdout: a supplied price exactly as given.
+  price: string;
   priceSource: string;
   value: string;
 }
@@ -167,7 +170,7 @@ function validateSuppliedPrice(raw: RawRequest): SuppliedPrice | undefined {
   if (/[\u0000-\u001f\u007f]/.test(raw.priceSource)) {
     throw new Error("price_source must be a single line of text");
   }
-  return { value, source: raw.priceSource };
+  return { value, text: raw.price, source: raw.priceSource };
 }
 
 async function produceReport(
@@ -197,7 +200,13 @@ async function produceReport(
   // A creator-supplied price replaces every lookup (CoinGecko, ESTV, FPS
   // contract) for this row; the PDF marks it as supplied.
   const price: ReportPrice = request.suppliedPrice
-    ? { currency: request.currency, value: request.suppliedPrice.value, source: request.suppliedPrice.source, supplied: true }
+    ? {
+        currency: request.currency,
+        value: request.suppliedPrice.value,
+        exactText: request.suppliedPrice.text,
+        source: request.suppliedPrice.source,
+        supplied: true,
+      }
     : reportPriceFromQuote(
         await fetchCurrencyPrice(rt, {
           asset,
@@ -228,7 +237,7 @@ async function produceReport(
     assetType,
     blockNumber,
     balance,
-    price: price.value,
+    price: price.supplied ? price.exactText : String(price.value),
     priceSource: price.supplied ? `supplied: ${price.source}` : price.source,
     value,
   };
@@ -360,7 +369,7 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string, overwrite:
         String(result.blockNumber),
         result.balance,
         request.currency,
-        String(result.price),
+        result.price,
         result.priceSource,
         result.value,
         addressHash,

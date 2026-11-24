@@ -8,16 +8,20 @@ import { brandSvgs, drawSvg } from "./logo";
 import type { PriceCurrency, PriceQuote } from "./price";
 
 // The one price the report is valued with.
-export interface ReportPrice {
+interface ReportPriceBase {
   currency: Currency;
   // Price of one unit of the asset in `currency`.
   value: number;
   // Where the price comes from, printed in parentheses after it.
   source: string;
-  // true: given by the report creator, not looked up by LedgerReport. The
-  // PDF then says so in its own row.
-  supplied: boolean;
 }
+
+export type ReportPrice =
+  | (ReportPriceBase & { supplied: false })
+  // Given by the report creator, not looked up by LedgerReport; the PDF says
+  // so in its own row. exactText is the validated input, printed unchanged
+  // so the value row can be recomputed from the printed price.
+  | (ReportPriceBase & { supplied: true; exactText: string });
 
 // The looked-up price for the chosen currency.
 export function reportPriceFromQuote(quote: PriceQuote, currency: Currency): ReportPrice {
@@ -180,7 +184,7 @@ export async function buildWalletBalancePdf({
   };
   wrappedRow(
     "Price:",
-    `${price.currency} ${formatPrice(price.value)} per ${formData.asset.name} (${price.source})`,
+    `${price.currency} ${price.supplied ? price.exactText : formatPrice(price.value)} per ${formData.asset.name} (${price.source})`,
   );
   if (price.supplied) {
     wrappedRow("Price source:", "Provided by the report creator — not fetched or verified by LedgerReport.");
