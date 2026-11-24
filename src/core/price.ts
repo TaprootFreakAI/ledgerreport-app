@@ -10,7 +10,7 @@ import {
 import { getEstvBtcChf } from "../utils/estvTaxValues";
 import { cacheKey } from "../utils/cacheKey";
 import { blockchainLabel } from "../utils/blockchainLabel";
-import { evmRpcUrl } from "./balance";
+import { evmRpc } from "./balance";
 import type { Runtime } from "./runtime";
 
 // Historical fiat price of an asset for the snapshot instant of a date.
@@ -178,23 +178,17 @@ async function coinHistory(rt: Runtime, coinId: string, day: string, subject: st
 // FPS price() in ZCHF (18 decimals) at the balance block.
 async function fpsPriceAtBlock(rt: Runtime, blockNumber: number): Promise<number> {
   const iface = new ethers.Interface(["function price() view returns (uint256)"]);
-  const response = await fetch(evmRpcUrl(rt, EvmBlockchain.ETH), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [{ to: FPS_CONTRACT, data: iface.encodeFunctionData("price") }, `0x${blockNumber.toString(16)}`],
-    }),
-  });
-  if (!response.ok) throw new Error(`Alchemy ${response.status} reading the FPS price`);
-  const data = await response.json();
-  if (data.error) throw new Error(`RPC error reading the FPS price: ${data.error.message}`);
-  if (typeof data.result !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(data.result)) {
+  const result = await evmRpc(
+    rt,
+    EvmBlockchain.ETH,
+    "eth_call",
+    [{ to: FPS_CONTRACT, data: iface.encodeFunctionData("price") }, `0x${blockNumber.toString(16)}`],
+    "Reading the FPS price",
+  );
+  if (typeof result !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(result)) {
     throw new Error("Unexpected FPS price() response");
   }
-  const price = parseFloat(ethers.formatUnits(BigInt(data.result), 18));
+  const price = parseFloat(ethers.formatUnits(BigInt(result), 18));
   if (!(price > 0)) throw new Error("FPS price() returned zero");
   return price;
 }

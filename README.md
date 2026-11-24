@@ -115,7 +115,9 @@ fetched once per run even when several chains share them; set `COINGECKO_DEMO_AP
 higher limit. Bitcoin balances read only the transactions after the
 snapshot block (current confirmed totals minus everything newer), with
 paced page requests and retries on HTTP 429/5xx; a history that cannot be
-read completely is an error, never a partial balance. Block numbers and
+read completely is an error, never a partial balance. Alchemy calls are
+retried on HTTP 429/5xx, network errors and JSON-RPC rate limits (up to 5
+retries, about 30 s); other JSON-RPC errors fail at once. Block numbers and
 prices are cached in memory for one run only. The PDF shows the address only as a hash, as in the web app.
 
 ## Icons

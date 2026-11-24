@@ -43,8 +43,86 @@ const evmRpcHost: Record<EvmBlockchain, string> = {
   [EvmBlockchain.GNOSIS]: "gnosis-mainnet",
 };
 
-export function evmRpcUrl(rt: Runtime, blockchain: EvmBlockchain): string {
+function evmRpcUrl(rt: Runtime, blockchain: EvmBlockchain): string {
   return `https://${evmRpcHost[blockchain]}.g.alchemy.com/v2/${rt.getAlchemyApiKey()}`;
+}
+
+// Retries for transient Alchemy failures: HTTP 429/500/502/503/504, network
+// errors and JSON-RPC rate-limit errors (code 429 or -32005). JSON-RPC calls
+// here only read chain state, so repeating one is safe. Without Retry-After
+// the wait doubles from 1 s up to 30 s: 1+2+4+8+16 s ≈ 31 s in total before
+// giving up. Other JSON-RPC errors (bad params, reverted call) are final.
+const EVM_MAX_RETRIES = 5;
+const EVM_BACKOFF_START_MS = 1_000;
+const EVM_BACKOFF_CAP_MS = 30_000;
+const EVM_MAX_RETRY_AFTER_MS = 60_000;
+const EVM_RETRY_STATUSES = [429, 500, 502, 503, 504];
+const EVM_RETRY_RPC_CODES = [429, -32005];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function retryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(header);
+  return isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+// One JSON-RPC call to Alchemy with bounded retries on transient failures.
+// Returns `result`; a final JSON-RPC error throws "<context>: <message>".
+// Error messages never include the request URL, which carries the API key.
+export async function evmRpc(
+  rt: Runtime,
+  blockchain: EvmBlockchain,
+  method: string,
+  params: unknown[],
+  context: string,
+): Promise<unknown> {
+  const label = blockchainLabel(blockchain);
+  for (let retry = 0; ; retry++) {
+    let reason: string;
+    let requestedWait: number | undefined;
+    try {
+      const response = await fetch(evmRpcUrl(rt, blockchain), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const error = data?.error as { code?: unknown; message?: unknown } | undefined;
+        if (!error) return data?.result;
+        if (!EVM_RETRY_RPC_CODES.includes(Number(error.code))) {
+          throw new Error(`${context}: ${String(error.message)}`);
+        }
+        reason = `rate limit (${String(error.message)})`;
+      } else if (EVM_RETRY_STATUSES.includes(response.status)) {
+        reason = `HTTP ${response.status}`;
+        requestedWait = retryAfterMs(response.headers.get("retry-after"));
+      } else {
+        throw new Error(`${context}: Alchemy answered HTTP ${response.status} on ${label}`);
+      }
+    } catch (e) {
+      // `fetch` rejects with TypeError on network-level failures.
+      if (!(e instanceof TypeError)) throw e;
+      reason = "network error";
+    }
+
+    if (retry >= EVM_MAX_RETRIES) {
+      throw new Error(
+        `${context}: ${label} node provider (Alchemy) still failing after ${EVM_MAX_RETRIES} retries (${reason}). Try again later.`,
+      );
+    }
+    if (requestedWait !== undefined && requestedWait > EVM_MAX_RETRY_AFTER_MS) {
+      throw new Error(
+        `${context}: ${label} node provider (Alchemy) asks to wait ${Math.ceil(requestedWait / 1000)} s (${reason}). Try again later.`,
+      );
+    }
+    const waitMs = requestedWait ?? Math.min(EVM_BACKOFF_START_MS * 2 ** retry, EVM_BACKOFF_CAP_MS);
+    rt.log(`Alchemy on ${label}: ${reason}, retry ${retry + 1}/${EVM_MAX_RETRIES} in ${Math.round(waitMs / 1000)} s`);
+    await sleep(waitMs);
+  }
 }
 
 const BTC_DECIMALS = 8;
@@ -116,25 +194,20 @@ async function fetchEvmBalance(
     throw new Error(`Asset ${asset.name} on ${label} has an unknown type — please report this on GitHub.`);
   }
 
-  const response = await fetch(evmRpcUrl(rt, blockchain), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, ...rpcRequest }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Alchemy ${response.status} on ${label}: ${response.statusText || "request failed"}`);
-  }
-
-  const data = await response.json();
-  if (data.error) throw new Error(`RPC error: ${data.error.message}`);
+  const result = await evmRpc(
+    rt,
+    blockchain,
+    rpcRequest.method,
+    rpcRequest.params,
+    `Reading the ${asset.name} balance on ${label}`,
+  );
 
   // A quantity is "0x" + at least one hex digit. eth_call against an address
   // without contract code answers a bare "0x" — that is not a zero balance.
-  if (typeof data.result !== "string" || !/^0x[0-9a-fA-F]+$/.test(data.result)) {
+  if (typeof result !== "string" || !/^0x[0-9a-fA-F]+$/.test(result)) {
     throw new Error(`Unexpected ${rpcRequest.method} response for ${asset.name} on ${label}`);
   }
-  const balanceFormatted = ethers.formatUnits(BigInt(data.result), asset.decimals);
+  const balanceFormatted = ethers.formatUnits(BigInt(result), asset.decimals);
   return { balance: formatTokenAmount(balanceFormatted), blockNumber };
 }
 
@@ -181,45 +254,25 @@ async function findEvmBlockByTimestamp(
 }
 
 async function getEvmCurrentBlockNumber(rt: Runtime, blockchain: EvmBlockchain): Promise<number> {
-  const response = await fetch(evmRpcUrl(rt, blockchain), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] }),
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Alchemy ${response.status} on ${blockchainLabel(blockchain)}: ${response.statusText || "request failed"}`,
-    );
-  }
-  const data = await response.json();
-  if (data.error) throw new Error(`Failed to get current block number: ${data.error.message}`);
-  const result = parseInt(data.result, 16);
-  if (isNaN(result)) throw new Error("Invalid block number response");
-  return result;
+  const result = await evmRpc(rt, blockchain, "eth_blockNumber", [], "Failed to get current block number");
+  const height = typeof result === "string" ? parseInt(result, 16) : NaN;
+  if (isNaN(height)) throw new Error("Invalid block number response");
+  return height;
 }
 
 async function getEvmBlockTimestamp(rt: Runtime, blockchain: EvmBlockchain, blockNumber: number): Promise<number> {
-  const response = await fetch(evmRpcUrl(rt, blockchain), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_getBlockByNumber",
-      params: [`0x${blockNumber.toString(16)}`, false],
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Alchemy ${response.status} on ${blockchainLabel(blockchain)}: ${response.statusText || "request failed"}`,
-    );
-  }
-  const data = await response.json();
-  if (data.error) throw new Error(`Failed to get block timestamp: ${data.error.message}`);
-  if (!data.result || !data.result.timestamp) throw new Error("Invalid block response");
-  const result = parseInt(data.result.timestamp, 16);
-  if (isNaN(result)) throw new Error("Invalid timestamp in block");
-  return result;
+  const result = await evmRpc(
+    rt,
+    blockchain,
+    "eth_getBlockByNumber",
+    [`0x${blockNumber.toString(16)}`, false],
+    "Failed to get block timestamp",
+  );
+  const timestamp = (result as { timestamp?: unknown } | null)?.timestamp;
+  if (typeof timestamp !== "string") throw new Error("Invalid block response");
+  const parsed = parseInt(timestamp, 16);
+  if (isNaN(parsed)) throw new Error("Invalid timestamp in block");
+  return parsed;
 }
 
 // ---------- Bitcoin (Esplora) ----------
@@ -271,17 +324,7 @@ const ESPLORA_PROGRESS_EVERY_PAGES = 20;
 // How often the history is re-read when the address changes while paging.
 const BTC_SNAPSHOT_ATTEMPTS = 3;
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 const PROVIDER_UNREACHABLE = "Bitcoin data provider unreachable. Check VITE_ESPLORA_URL or retry.";
-
-function retryAfterMs(header: string | null): number | undefined {
-  if (header === null) return undefined;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const date = Date.parse(header);
-  return isNaN(date) ? undefined : Math.max(0, date - Date.now());
-}
 
 // GET an Esplora URL, retrying rate limits (429), gateway errors (502/503/504)
 // and network failures with Retry-After or capped exponential backoff. Any
