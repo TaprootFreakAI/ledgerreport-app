@@ -17,8 +17,8 @@ passed (block timestamps may lag by up to 2 hours).
 Every report carries a historical price and names it in the PDF. CoinGecko's
 history value for a day is the price at 00:00:00 UTC of that day, so Start
 of day uses the date itself and End of day the following day (one second
-after the snapshot). For BTC in CHF the official ESTV year-end rate takes
-precedence where published. FPS uses its contract `price()` at the snapshot
+after the snapshot). For BTC in CHF at End of day the official ESTV
+year-end rate takes precedence where published. FPS uses its contract `price()` at the snapshot
 block. There is no fallback to today's price: a token CoinGecko does not
 list, a day it has no data for, or a price not yet published (End of day
 of yesterday before about 01:00 UTC) is an error. CoinGecko's public API
@@ -37,7 +37,7 @@ only serves the last 365 days. URL parameters: `network`, `token`, `address`, `d
 - EVM balances via Alchemy (requires `VITE_ALCHEMY_API_KEY`)
 - Prices via CoinGecko `/coins/{id}/history` (token contracts resolved to
   their coin id via `/coins/{platform}/contract/{address}`)
-- ESTV ICTax CHF override on known Swiss year-end record dates
+- ESTV ICTax CHF override on known Swiss year-end record dates (End of day)
 
 Supports 8 EVM chains today: Ethereum, BNB Smart Chain, Polygon, Arbitrum,
 Optimism, Base, Haqq, Gnosis — plus Bitcoin.

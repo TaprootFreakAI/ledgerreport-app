@@ -23,7 +23,8 @@ import type { Runtime } from "./runtime";
 // Point in time: CoinGecko's /coins/{id}/history value for day X is the price
 // at 00:00:00 UTC of X. "start" (00:00:00 UTC of D) uses day D; "end"
 // (23:59:59 UTC of D) uses day D+1, one second after the balance snapshot.
-// An official ESTV year-end CHF rate, where one exists, takes precedence.
+// For End of day, an official ESTV year-end CHF rate, where one exists,
+// takes precedence; Start of day always uses CoinGecko's value of D.
 
 export type PriceCurrency = "usd" | "eur" | "chf";
 
@@ -238,8 +239,10 @@ export async function fetchCurrencyPrice(
   };
 
   // For BTC the Swiss wealth tax uses ESTV's official ICTax year-end rate,
-  // not a market-aggregator price; it takes precedence where published.
-  if (isBtcBlockchain(blockchain)) {
+  // not a market-aggregator price; it takes precedence where published. It is
+  // the closing rate of the record date, so it only fits the End of day
+  // snapshot; Start of day (00:00:00 UTC) keeps CoinGecko's value of D.
+  if (snapshot === "end" && isBtcBlockchain(blockchain)) {
     const estvChf = getEstvBtcChf(date);
     if (estvChf !== undefined) {
       quote.chf = estvChf;
