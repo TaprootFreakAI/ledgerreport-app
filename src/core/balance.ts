@@ -207,9 +207,12 @@ async function fetchEvmBalance(
     `Reading the ${asset.name} balance on ${label}`,
   );
 
-  // A quantity is "0x" + at least one hex digit. eth_call against an address
+  // eth_getBalance returns a quantity: "0x" + at least one hex digit.
+  // balanceOf via eth_call returns an ABI uint256: exactly 32 bytes (64 hex
+  // digits); any other length is not a balance. eth_call against an address
   // without contract code answers a bare "0x" — that is not a zero balance.
-  if (typeof result !== "string" || !/^0x[0-9a-fA-F]+$/.test(result)) {
+  const expected = rpcRequest.method === "eth_call" ? /^0x[0-9a-fA-F]{64}$/ : /^0x[0-9a-fA-F]+$/;
+  if (typeof result !== "string" || !expected.test(result)) {
     throw new Error(`Unexpected ${rpcRequest.method} response for ${asset.name} on ${label}`);
   }
   const balanceFormatted = ethers.formatUnits(BigInt(result), asset.decimals);
