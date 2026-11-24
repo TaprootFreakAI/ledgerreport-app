@@ -229,9 +229,9 @@ async function findEvmBlockByTimestamp(
     throw new Error(`Invalid current block number for ${blockchainLabel(blockchain)}`);
   }
 
-  let low = 1;
+  let low = 0;
   let high = currentBlock;
-  let bestBlock = high;
+  let bestBlock: number | undefined;
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
@@ -247,6 +247,12 @@ async function findEvmBlockByTimestamp(
     } else {
       high = mid - 1;
     }
+  }
+
+  // No block at or before the target: the date lies before the chain's
+  // genesis. Falling back to any block would report another day's balance.
+  if (bestBlock === undefined) {
+    throw new Error(`Date is before ${blockchainLabel(blockchain)} existed`);
   }
 
   rt.cache.set(key, bestBlock.toString());
