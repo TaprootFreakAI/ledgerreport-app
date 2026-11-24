@@ -120,37 +120,51 @@ async function fetchEvmBalance(
   const blockNumber = await findEvmBlockByTimestamp(blockchain, targetTimestamp);
   if (isNaN(blockNumber)) throw new Error(`Failed to find block for timestamp: ${timestamp}`);
 
+  const label = blockchainLabel(blockchain);
+  if (asset.decimals === undefined || asset.decimals === null) {
+    throw new Error(`Asset ${asset.name} on ${label} has no decimals — please report this on GitHub.`);
+  }
+
   const normalizedAddress = ethers.getAddress(walletAddress.toLowerCase());
-  const abi = ["function balanceOf(address account)"];
-  const iface = new ethers.Interface(abi);
-  const edata = iface.encodeFunctionData("balanceOf", [normalizedAddress]);
+  const blockTag = `0x${blockNumber.toString(16)}`;
+
+  // Native coins (ETH, BNB, POL, xDAI, ...) are not ERC-20 contracts. The DFX
+  // asset list carries the *wrapped* token's address as their chainId (WETH
+  // for ETH etc.), so balanceOf on it would report the wrapped balance, not
+  // the native one. Read the account balance itself instead.
+  let rpcRequest: { method: string; params: unknown[] };
+  if (asset.type === "Coin") {
+    rpcRequest = { method: "eth_getBalance", params: [normalizedAddress, blockTag] };
+  } else if (asset.type === "Token") {
+    if (!asset.chainId || !ethers.isAddress(asset.chainId)) {
+      throw new Error(`Token ${asset.name} on ${label} has no contract address — please report this on GitHub.`);
+    }
+    const iface = new ethers.Interface(["function balanceOf(address account)"]);
+    const edata = iface.encodeFunctionData("balanceOf", [normalizedAddress]);
+    rpcRequest = { method: "eth_call", params: [{ to: asset.chainId, data: edata }, blockTag] };
+  } else {
+    throw new Error(`Asset ${asset.name} on ${label} has an unknown type — please report this on GitHub.`);
+  }
 
   const response = await fetch(evmFetchUrl[blockchain], {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [{ to: asset.chainId, data: edata }, `0x${blockNumber.toString(16)}`],
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, ...rpcRequest }),
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Alchemy ${response.status} on ${blockchainLabel(blockchain)}: ${response.statusText || "request failed"}`,
-    );
+    throw new Error(`Alchemy ${response.status} on ${label}: ${response.statusText || "request failed"}`);
   }
 
   const data = await response.json();
   if (data.error) throw new Error(`RPC error: ${data.error.message}`);
 
-  if (asset.decimals === undefined || asset.decimals === null) {
-    throw new Error(
-      `Asset ${asset.name} on ${blockchainLabel(blockchain)} has no decimals — please report this on GitHub.`,
-    );
+  // A quantity is "0x" + at least one hex digit. eth_call against an address
+  // without contract code answers a bare "0x" — that is not a zero balance.
+  if (typeof data.result !== "string" || !/^0x[0-9a-fA-F]+$/.test(data.result)) {
+    throw new Error(`Unexpected ${rpcRequest.method} response for ${asset.name} on ${label}`);
   }
-  const balanceFormatted = ethers.formatUnits(data.result, asset.decimals);
+  const balanceFormatted = ethers.formatUnits(BigInt(data.result), asset.decimals);
   return formatTokenAmount(balanceFormatted);
 }
 
