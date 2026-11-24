@@ -96,6 +96,8 @@ interface ValidRequest {
 }
 
 interface ReportResult {
+  // The resolved asset's own chain, which balance and price were read on.
+  network: Blockchain;
   assetType: string;
   blockNumber: number;
   balance: string;
@@ -196,7 +198,6 @@ async function produceReport(
     : reportPriceFromQuote(
         await fetchCurrencyPrice(rt, {
           asset,
-          blockchain: request.network,
           date: request.date,
           snapshot: request.snapshot,
           blockNumber,
@@ -211,7 +212,6 @@ async function produceReport(
     formData: {
       date: request.date,
       snapshot: request.snapshot,
-      network: request.network,
       asset,
       address: request.address,
     },
@@ -221,6 +221,7 @@ async function produceReport(
   await writeFile(outFile, new Uint8Array(doc.output("arraybuffer")));
 
   return {
+    network: asset.blockchain,
     assetType,
     blockNumber,
     balance,
@@ -254,7 +255,7 @@ async function runSingle(rt: Runtime, raw: RawRequest, outFile: string): Promise
     const request = validateRequest(raw);
     const result = await produceReport(rt, await loadAssets(), request, outFile);
     const lines = [
-      `network:      ${request.network}`,
+      `network:      ${result.network}`,
       `token:        ${request.token} (${result.assetType})`,
       `date:         ${request.date} (${request.snapshot} of day, UTC)`,
       `block:        ${result.blockNumber}`,
@@ -325,7 +326,7 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<n
       const result = await produceReport(rt, await loadAssets(), request, join(outDir, fileName));
       summary.push([
         rowNo,
-        request.network,
+        result.network,
         request.token,
         result.assetType,
         request.date,

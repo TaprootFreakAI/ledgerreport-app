@@ -38,8 +38,10 @@ export interface PriceQuote {
 }
 
 export interface FetchPriceParams {
+  // The chain comes from the asset itself (asset.blockchain), the same one
+  // the balance is read on, so balance and price can never be from two
+  // different chains.
   asset: SupportedAsset;
-  blockchain: Blockchain;
   // Calendar day YYYY-MM-DD.
   date: string;
   snapshot: Snapshot;
@@ -196,8 +198,9 @@ async function fpsPriceAtBlock(rt: Runtime, blockNumber: number): Promise<number
 
 export async function fetchCurrencyPrice(
   rt: Runtime,
-  { asset, blockchain, date, snapshot, blockNumber }: FetchPriceParams,
+  { asset, date, snapshot, blockNumber }: FetchPriceParams,
 ): Promise<PriceQuote> {
+  const blockchain: Blockchain = asset.blockchain;
   const priceDay = snapshot === "start" ? date : addDays(date, 1);
   const publishedAt = new Date(priceDay + "T00:00:00Z").getTime() + COINGECKO_PUBLISH_DELAY_MS;
   if (Date.now() < publishedAt) {

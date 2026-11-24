@@ -245,6 +245,19 @@ export default function App() {
     if (matchedAsset) {
       setValue("asset", matchedAsset);
     } else if (assetMap) {
+      // Never leave a token of another network selected: fall back to this
+      // network's native coin, as the sync effect below does without a
+      // token parameter, and say why. setValue runs first because the form
+      // watcher clears `error` on every change.
+      const candidates = selectedNetwork ? assetMap[selectedNetwork] : undefined;
+      if (candidates?.length) {
+        try {
+          setValue("asset", pickNativeAsset(candidates));
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return;
+        }
+      }
       setError(`Token "${tokenParam}" not found in network "${selectedNetwork}"`);
     }
   }, [urlParams, assetMap, selectedNetwork]);
@@ -279,12 +292,20 @@ export default function App() {
   }, [assetMap, selectedNetwork, selectedAsset, urlParams]);
 
   async function onSubmit(data: FormData) {
+    // Balance and price are both read on the asset's own chain; a token left
+    // over from another network must never be reported under this one.
+    if (!data.asset || data.asset.blockchain !== data.network) {
+      setError(
+        `The selected token does not belong to ${blockchainLabel(data.network)} — select the token again.`,
+      );
+      return;
+    }
     const submit = ++latestSubmit.current;
     setError(undefined);
     // Invalidate a price lookup of an earlier submit that may still run.
     resetPrice();
     setSubmittedRequest(data);
-    const { date, snapshot, address, network, asset } = data;
+    const { date, snapshot, address, asset } = data;
 
     try {
       const { blockNumber } = await fetchBalance({
@@ -297,7 +318,6 @@ export default function App() {
 
       await fetchPrice({
         asset,
-        blockchain: network,
         date,
         snapshot,
         blockNumber,

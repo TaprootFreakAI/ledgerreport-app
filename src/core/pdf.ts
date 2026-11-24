@@ -49,8 +49,9 @@ export interface ReportParams {
   formData: {
     date: string;
     snapshot: Snapshot;
-    network: Blockchain;
-    asset: { name: string };
+    // The network printed is the asset's own chain, the one balance and
+    // price were read on, never a separately selected network.
+    asset: { name: string; blockchain: Blockchain };
     address: string;
   };
   balance: string;
@@ -149,7 +150,7 @@ export async function buildWalletBalancePdf({
   y += rowGap;
 
   doc.text("Network:", labelX, y);
-  doc.text(blockchainLabel(formData.network), valueX, y);
+  doc.text(blockchainLabel(formData.asset.blockchain), valueX, y);
   y += rowGap;
 
   doc.text("Token:", labelX, y);
