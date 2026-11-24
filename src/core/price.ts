@@ -1,4 +1,4 @@
-import { NonEvmBlockchain, isBtcBlockchain, type Blockchain } from "../types";
+import { EvmBlockchain, NonEvmBlockchain, isBtcBlockchain, type Blockchain } from "../types";
 import { getEstvBtcChf } from "../utils/estvTaxValues";
 import { cacheKey } from "../utils/cacheKey";
 import { blockchainLabel } from "../utils/blockchainLabel";
@@ -15,6 +15,9 @@ export interface PriceData {
 
 export interface FetchPriceParams {
   contractAddress?: string;
+  // Asset list type "Coin": priced by its CoinGecko coin id, not by
+  // contractAddress (which for native EVM coins is the wrapped token).
+  isNativeCoin: boolean;
   blockchain: Blockchain;
   // Calendar day YYYY-MM-DD.
   date: string;
@@ -35,9 +38,21 @@ const platformMap: Record<string, string> = {
   Gnosis: "xdai",
 };
 
-// Map blockchain names to CoinGecko coin IDs for native-coin price lookups
-const nativeCoinMap: Partial<Record<Blockchain, string>> = {
+// Map blockchain names to CoinGecko coin IDs for native-coin price lookups.
+// The EVM entries matter because CoinGecko has no historical endpoint per
+// contract address (/coins/{platform}/contract/{address}/history answers
+// 404), so pricing a native coin via its wrapped token's contract never
+// yielded a price for the requested date.
+const nativeCoinMap: Record<Blockchain, string> = {
   [NonEvmBlockchain.BTC]: "bitcoin",
+  [EvmBlockchain.ETH]: "ethereum",
+  [EvmBlockchain.ARB]: "ethereum",
+  [EvmBlockchain.OPT]: "ethereum",
+  [EvmBlockchain.BASE]: "ethereum",
+  [EvmBlockchain.BSC]: "binancecoin",
+  [EvmBlockchain.POLYGON]: "polygon-ecosystem-token",
+  [EvmBlockchain.GNOSIS]: "xdai",
+  [EvmBlockchain.HAQQ]: "islamic-coin",
 };
 
 // Pull a fiat-priced field from a CoinGecko response shape and throw if the
@@ -72,14 +87,16 @@ function formatDate(date: string): string {
 
 export async function fetchCurrencyPrice(
   rt: Runtime,
-  { contractAddress, blockchain, date, historicalOnly }: FetchPriceParams,
+  { contractAddress, isNativeCoin, blockchain, date, historicalOnly }: FetchPriceParams,
 ): Promise<PriceData> {
   const formattedDate = formatDate(date);
 
-  // Native-coin path (e.g. BTC) — no contract, use /coins/{id}/history
-  if (!contractAddress || isBtcBlockchain(blockchain)) {
+  // Native-coin path (BTC, ETH, BNB, ...) — use /coins/{id}/history
+  if (isNativeCoin || !contractAddress || isBtcBlockchain(blockchain)) {
+    if (!isNativeCoin) {
+      throw new Error(`[CoinGecko] No contract address to price this token on ${blockchainLabel(blockchain)}`);
+    }
     const coinId = nativeCoinMap[blockchain];
-    if (!coinId) throw new Error(`[CoinGecko] No native coin id for blockchain: ${blockchainLabel(blockchain)}`);
 
     const key = cacheKey(["price-coin", coinId, formattedDate]);
     const cached = rt.cache.get(key);

@@ -147,6 +147,7 @@ async function produceReport(
     // path that would return today's price an error.
     prices = await fetchCurrencyPrice(rt, {
       contractAddress: asset.chainId,
+      isNativeCoin: asset.type === "Coin",
       blockchain: request.network,
       date: request.date,
       historicalOnly: true,

@@ -266,6 +266,7 @@ export default function App() {
 
       await fetchPrice({
         contractAddress: asset.chainId,
+        isNativeCoin: asset.type === "Coin",
         blockchain: network,
         date,
       });

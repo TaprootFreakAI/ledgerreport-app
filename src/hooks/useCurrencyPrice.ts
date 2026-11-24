@@ -11,6 +11,7 @@ interface CurrencyPriceResult {
 
 interface FetchPriceParams {
   contractAddress?: string;
+  isNativeCoin: boolean;
   blockchain: Blockchain;
   date: string;
 }
@@ -25,12 +26,13 @@ export const useCurrencyPrice = () => {
     error: null,
   });
 
-  const fetchPrice = useCallback(async ({ contractAddress, blockchain, date }: FetchPriceParams) => {
+  const fetchPrice = useCallback(async ({ contractAddress, isNativeCoin, blockchain, date }: FetchPriceParams) => {
     setResult({ prices: null, loading: true, error: null });
 
     try {
       const prices = await fetchCurrencyPrice(browserRuntime, {
         contractAddress,
+        isNativeCoin,
         blockchain,
         date,
         historicalOnly: false,
