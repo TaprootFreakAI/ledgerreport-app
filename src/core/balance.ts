@@ -389,7 +389,6 @@ interface EsploraChainStats {
   tx_count: number;
 }
 
-const ESPLORA_PAGE_SIZE = 25;
 // Gap between two history pages. An unpaced walk through hundreds of pages
 // runs into mempool.space's rate limit (HTTP 429); two requests per second
 // stays below it while a 500-page history still finishes in a few minutes.
@@ -487,12 +486,18 @@ const sameStats = (a: EsploraChainStats, b: EsploraChainStats) =>
 
 // Net satoshi effect on the address of all confirmed TXs above targetHeight.
 // Esplora lists confirmed TXs newest-first, so paging stops at the first TX
-// at or below targetHeight instead of walking the whole history.
+// at or below targetHeight instead of walking the whole history. The only
+// other stop is an empty page (end of history): the page size is the
+// provider's choice, so a short page proves nothing and must not end the walk.
 async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeight: number): Promise<number> {
   let net = 0;
   let pages = 0;
   let lastSeenTxid: string | undefined;
   let previousHeight = Number.POSITIVE_INFINITY;
+  let txCount = 0;
+  // Guards the paging cursor: a provider that ignored it would return the
+  // same transactions again and, without a size-based stop, never end.
+  const seenTxids = new Set<string>();
   const finish = () => {
     if (pages >= ESPLORA_PROGRESS_EVERY_PAGES) rt.log(`Bitcoin history: done after ${pages} pages`);
     return net;
@@ -505,11 +510,15 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
       : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
     const page = parseEsploraPage(await esploraAddressJson(rt, url));
     pages++;
+    if (page.length === 0) return finish();
+    txCount += page.length;
     if (pages % ESPLORA_PROGRESS_EVERY_PAGES === 0) {
-      rt.log(`Bitcoin history: ${pages} pages (${pages * ESPLORA_PAGE_SIZE} transactions) read`);
+      rt.log(`Bitcoin history: ${pages} pages (${txCount} transactions) read`);
     }
 
     for (const tx of page) {
+      if (seenTxids.has(tx.txid)) throw new Error(INVALID_HISTORY);
+      seenTxids.add(tx.txid);
       const height = tx.blockHeight;
       // The early stop below is only correct for newest-first order; refuse
       // to compute anything if the provider ever returns another order.
@@ -540,7 +549,6 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
       if (!touchesAddress) throw new Error(INVALID_HISTORY);
     }
 
-    if (page.length < ESPLORA_PAGE_SIZE) return finish();
     lastSeenTxid = page[page.length - 1].txid;
   }
 }
