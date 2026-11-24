@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 
 import { isSupportedBlockchain, type Blockchain, type Currency, type Snapshot } from "../types";
 import { isParsableDay, isSnapshot } from "../utils/snapshot";
+import { blockchainLabel } from "../utils/blockchainLabel";
 import { fetchAssetMap, resolveAsset, type AssetMap, type AssetType } from "../core/assets";
 import { fetchWalletBalance } from "../core/balance";
 import { fetchCurrencyPrice } from "../core/price";
@@ -171,6 +172,15 @@ async function produceReport(
   outFile: string,
 ): Promise<ReportResult> {
   const asset = resolveAsset(assetMap, request.network, request.token, request.tokenType);
+  // The web app gets this guarantee from the price lookup, which rejects an
+  // unknown type; a row with a supplied price skips that lookup, so check
+  // here once, before anything is fetched or written.
+  const assetType = asset.type;
+  if (assetType !== "Coin" && assetType !== "Token") {
+    throw new Error(
+      `Asset ${asset.name} on ${blockchainLabel(request.network)} has an unknown type — please report this on GitHub.`,
+    );
+  }
 
   const { balance, blockNumber } = await fetchWalletBalance(rt, {
     asset,
@@ -211,7 +221,7 @@ async function produceReport(
   await writeFile(outFile, new Uint8Array(doc.output("arraybuffer")));
 
   return {
-    assetType: asset.type ?? "",
+    assetType,
     blockNumber,
     balance,
     price: price.value,
