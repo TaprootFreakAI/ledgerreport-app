@@ -116,9 +116,9 @@ usage errors). CoinGecko requests are spaced by `--price-interval-ms`
 fetched once per run even when several chains share them; set `COINGECKO_DEMO_API_KEY` for a
 higher limit. Bitcoin balances read only the transactions after the
 snapshot block (current confirmed totals minus everything newer), with
-paced page requests and retries on HTTP 429/5xx; a history that cannot be
+paced page requests and retries on HTTP 429, 502, 503 and 504; a history that cannot be
 read completely is an error, never a partial balance. Alchemy calls are
-retried on HTTP 429/5xx, network errors and JSON-RPC rate limits (up to 5
+retried on HTTP 429, 500, 502, 503 and 504, network errors and JSON-RPC rate limits (up to 5
 retries, about 30 s); other JSON-RPC errors fail at once. Block numbers and
 prices are cached in memory for one run only. The PDF shows the address only as a hash, as in the web app.
 
