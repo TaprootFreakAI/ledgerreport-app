@@ -66,7 +66,8 @@ Both commands must be clean before pushing.
 
 The same balance, price and PDF code runs from the command line, without a
 browser. `npm run report` builds the CLI (`vite build --ssr` into
-`dist-cli/`) and runs it with Node. The Alchemy key is read from
+`dist-cli/`) and runs it with Node (20.12 or newer, needed for
+`process.loadEnvFile`). The Alchemy key is read from
 `VITE_ALCHEMY_API_KEY` in the environment or `.env` (needed for EVM chains
 only); `VITE_ESPLORA_URL` works as in the web app.
 
