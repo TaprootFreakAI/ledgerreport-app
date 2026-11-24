@@ -57,6 +57,14 @@ const SUPPORTED_NETWORKS: Blockchain[] = [
 
 const CURRENCIES: FormData["currency"][] = ["CHF", "EUR", "USD"];
 
+// 31 December of the previous year — the wealth-tax record date in
+// Switzerland, which is the primary use case for this tool. Used as the
+// form default and in the example link, so the example always stays inside
+// CoinGecko's 365-day history window.
+const previousYearEnd = () => `${new Date().getFullYear() - 1}-12-31`;
+
+const EXAMPLE_ADDRESS = "0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe";
+
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
@@ -107,9 +115,7 @@ export default function App() {
     defaultValues: {
       currency: "CHF",
       network: NonEvmBlockchain.BTC,
-      // Default to 31 December of the previous year — the wealth-tax record
-      // date in Switzerland, which is the primary use case for this tool.
-      date: `${new Date().getFullYear() - 1}-12-31`,
+      date: previousYearEnd(),
       // End of day: the year-end record needs the balance after the last
       // block of 31 December, not the one at 00:00:00 UTC.
       snapshot: "end",
@@ -433,10 +439,10 @@ export default function App() {
         <p className="px-4 pb-8 text-center text-sm text-neutral-700">
           Example:{" "}
           <a
-            href="/?network=Ethereum&token=USDT&address=0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe&date=2024-12-31"
+            href={`/?network=Ethereum&token=USDT&address=${EXAMPLE_ADDRESS}&date=${previousYearEnd()}&snapshot=end`}
             className="break-all rounded-sm text-brand-800 underline underline-offset-2 decoration-brand-800/50 hover:decoration-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
           >
-            /?network=Ethereum&amp;token=USDT&amp;address=0xde0B…&amp;date=2024-12-31
+            {`/?network=Ethereum&token=USDT&address=${EXAMPLE_ADDRESS.slice(0, 6)}…&date=${previousYearEnd()}&snapshot=end`}
           </a>
         </p>
       </main>
