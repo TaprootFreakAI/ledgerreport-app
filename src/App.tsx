@@ -366,7 +366,7 @@ export default function App() {
           >
             <WalletAddressInput register={register} errors={errors} setValue={setValue} />
 
-            <SectionRow title="Blockchain" variant="first" headingId={blockchainHeadingId}>
+            <SectionRow title="Blockchain" variant="first" headingId={blockchainHeadingId} printHidden>
               <SegmentedControl<Blockchain>
                 options={availableNetworks.map((n) => ({ value: n, label: blockchainLabel(n) }))}
                 value={selectedNetwork}
@@ -375,7 +375,7 @@ export default function App() {
               />
             </SectionRow>
 
-            <SectionRow title="Token" headingId={tokenHeadingId}>
+            <SectionRow title="Token" headingId={tokenHeadingId} printHidden>
               <TokenSelect
                 options={selectedNetwork ? assetMap[selectedNetwork] ?? [] : []}
                 value={selectedAsset}
@@ -410,7 +410,7 @@ export default function App() {
               </div>
             </SectionRow>
 
-            <SectionRow title="Currency" variant="last" headingId={currencyHeadingId}>
+            <SectionRow title="Currency" variant="last" headingId={currencyHeadingId} printHidden>
               <SegmentedControl<FormData["currency"]>
                 options={CURRENCIES.map((c) => ({ value: c, label: c }))}
                 value={selectedCurrency}
