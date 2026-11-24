@@ -554,9 +554,12 @@ async function findBtcBlockByTimestamp(rt: Runtime, targetTimestamp: number): Pr
   // snapshot resolve to the last block at or before that instant.
   const res = await esploraFetch(rt, `${rt.esploraBase}/v1/mining/blocks/timestamp/${targetTimestamp}`);
   if (!res.ok) throw new Error(`Failed to resolve Bitcoin block for timestamp: ${res.status}`);
-  const data = await res.json();
-  if (typeof data.height !== "number") throw new Error("Invalid Esplora timestamp response");
+  const data: unknown = await res.json();
+  const height = (data as { height?: unknown } | null)?.height;
+  if (typeof height !== "number" || !Number.isSafeInteger(height) || height < 0) {
+    throw new Error("Invalid response from the Bitcoin data provider when resolving the block for this date");
+  }
 
-  rt.cache.set(key, data.height.toString());
-  return data.height;
+  rt.cache.set(key, height.toString());
+  return height;
 }
