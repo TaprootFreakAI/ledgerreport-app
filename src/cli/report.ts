@@ -1,0 +1,414 @@
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { parseArgs } from "node:util";
+
+import { isSupportedBlockchain, type Blockchain, type Currency, type Snapshot } from "../types";
+import { isParsableDay, isSnapshot } from "../utils/snapshot";
+import { fetchAssetMap, resolveAsset, type AssetMap, type AssetType } from "../core/assets";
+import { fetchWalletBalance } from "../core/balance";
+import { fetchCurrencyPrice, type PriceData } from "../core/price";
+import { addressHashForReport, buildWalletBalancePdf } from "../core/pdf";
+import type { Runtime } from "../core/runtime";
+import { createNodeRuntime } from "./nodeRuntime";
+import { formatCsv, parseCsv } from "./csv";
+
+// Headless report generation: the same balance, price and PDF code as the
+// web app, driven from the command line. See README.md ("Headless reports").
+
+const USAGE = `Usage:
+  npm run report -- --network <chain> --token <name> [--token-type Coin|Token]
+                    --address <address> --date YYYY-MM-DD --snapshot start|end
+                    (--currency CHF|EUR|USD|none | --no-price) --out <file.pdf>
+
+  npm run report -- --batch <items.csv> --out-dir <dir>
+
+Batch CSV columns: network, token, address, date, snapshot, currency
+(optional: token_type). Writes one PDF per row plus summary.csv into --out-dir.
+
+Options:
+  --price-interval-ms <ms>  Minimum gap between CoinGecko requests (default 6000)
+  --help                    Show this help
+
+Exit code: 0 all reports written, 1 at least one report failed, 2 usage error.`;
+
+const DEFAULT_PRICE_INTERVAL_MS = 6000;
+const CSV_REQUIRED_COLUMNS = ["network", "token", "address", "date", "snapshot", "currency"] as const;
+const CSV_OPTIONAL_COLUMNS = ["token_type"] as const;
+const SUMMARY_HEADER = [
+  "row",
+  "network",
+  "token",
+  "token_type",
+  "date",
+  "snapshot",
+  "block",
+  "balance",
+  "currency",
+  "price",
+  "value",
+  "address_hash",
+  "pdf",
+  "status",
+  "error",
+];
+
+class UsageError extends Error {}
+
+type ReportCurrency = Currency | "none";
+
+// One requested report exactly as given (CLI flags or one CSV row).
+interface RawRequest {
+  network: string;
+  token: string;
+  tokenType: string;
+  address: string;
+  date: string;
+  snapshot: string;
+  currency: string;
+}
+
+interface ValidRequest {
+  network: Blockchain;
+  token: string;
+  tokenType: AssetType | undefined;
+  address: string;
+  date: string;
+  snapshot: Snapshot;
+  currency: ReportCurrency;
+}
+
+interface ReportResult {
+  assetType: string;
+  blockNumber: number;
+  balance: string;
+  price: number | null;
+  value: string | null;
+}
+
+function validateRequest(raw: RawRequest): ValidRequest {
+  if (!isSupportedBlockchain(raw.network)) {
+    throw new Error(`Unsupported network "${raw.network}"`);
+  }
+  if (!raw.token) throw new Error("Token is missing");
+  if (!raw.address) throw new Error("Address is missing");
+
+  // Same rules as the form: a real calendar day, not in the future.
+  if (!isParsableDay(raw.date) || new Date(raw.date + "T00:00:00Z").toISOString().slice(0, 10) !== raw.date) {
+    throw new Error(`Invalid date "${raw.date}" — expected YYYY-MM-DD`);
+  }
+  if (new Date(raw.date) > new Date()) throw new Error(`Date ${raw.date} is in the future`);
+
+  if (!isSnapshot(raw.snapshot)) {
+    throw new Error(`Invalid snapshot "${raw.snapshot}" — use "start" or "end"`);
+  }
+  if (!["CHF", "EUR", "USD", "none"].includes(raw.currency)) {
+    throw new Error(`Invalid currency "${raw.currency}" — use CHF, EUR, USD or none`);
+  }
+
+  let tokenType: AssetType | undefined;
+  const typeInput = raw.tokenType.toLowerCase();
+  if (typeInput === "coin") tokenType = "Coin";
+  else if (typeInput === "token") tokenType = "Token";
+  else if (typeInput !== "") throw new Error(`Invalid token type "${raw.tokenType}" — use Coin or Token`);
+
+  return {
+    network: raw.network,
+    token: raw.token,
+    tokenType,
+    address: raw.address,
+    date: raw.date,
+    snapshot: raw.snapshot,
+    currency: raw.currency as ReportCurrency,
+  };
+}
+
+async function produceReport(
+  rt: Runtime,
+  assetMap: AssetMap,
+  request: ValidRequest,
+  outFile: string,
+): Promise<ReportResult> {
+  const asset = resolveAsset(assetMap, request.network, request.token, request.tokenType);
+
+  const { balance, blockNumber } = await fetchWalletBalance(rt, {
+    asset,
+    walletAddress: request.address,
+    date: request.date,
+    snapshot: request.snapshot,
+  });
+
+  let prices: PriceData | null = null;
+  let price: number | null = null;
+  let value: string | null = null;
+  const currency = request.currency;
+  if (currency !== "none") {
+    // Same contract address as the form passes; historicalOnly makes every
+    // path that would return today's price an error.
+    prices = await fetchCurrencyPrice(rt, {
+      contractAddress: asset.chainId,
+      blockchain: request.network,
+      date: request.date,
+      historicalOnly: true,
+    });
+    price = prices[currency.toLowerCase() as keyof PriceData];
+    value = (parseFloat(balance) * price).toFixed(2);
+  }
+
+  // Only reached when balance (and price, if requested) are known — a failed
+  // lookup above throws and no PDF is written.
+  const doc = await buildWalletBalancePdf({
+    formData: {
+      date: request.date,
+      snapshot: request.snapshot,
+      network: request.network,
+      asset,
+      address: request.address,
+    },
+    balance,
+    prices,
+    // The PDF prints a fiat row only when prices are given; the currency is
+    // irrelevant for a balance-only report.
+    selectedCurrency: currency === "none" ? "CHF" : currency,
+  });
+  await writeFile(outFile, new Uint8Array(doc.output("arraybuffer")));
+
+  return { assetType: asset.type ?? "", blockNumber, balance, price, value };
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+// The asset list is loaded once per run; if that fails, every report fails
+// with the same error.
+function assetMapLoader(): () => Promise<AssetMap> {
+  let pending: Promise<AssetMap> | undefined;
+  return () => {
+    if (!pending) pending = fetchAssetMap();
+    return pending;
+  };
+}
+
+function safeFilePart(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "_");
+}
+
+async function runSingle(rt: Runtime, raw: RawRequest, outFile: string): Promise<number> {
+  const loadAssets = assetMapLoader();
+  try {
+    const request = validateRequest(raw);
+    const result = await produceReport(rt, await loadAssets(), request, outFile);
+    const lines = [
+      `network:      ${request.network}`,
+      `token:        ${request.token} (${result.assetType})`,
+      `date:         ${request.date} (${request.snapshot} of day, UTC)`,
+      `block:        ${result.blockNumber}`,
+      `balance:      ${result.balance}`,
+      result.price === null
+        ? "price:        not requested"
+        : `price:        ${result.price} ${request.currency}`,
+      result.value === null ? null : `value:        ${result.value} ${request.currency}`,
+      `address hash: ${await addressHashForReport(request.address)}`,
+      `pdf:          ${outFile}`,
+    ].filter((l): l is string => l !== null);
+    process.stdout.write(lines.join("\n") + "\n");
+    return 0;
+  } catch (e) {
+    process.stderr.write(`Report failed: ${errorMessage(e)}\n`);
+    return 1;
+  }
+}
+
+function readBatchRows(text: string): RawRequest[] {
+  const rows = parseCsv(text);
+  if (rows.length === 0) throw new UsageError("Batch CSV is empty");
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const known: readonly string[] = [...CSV_REQUIRED_COLUMNS, ...CSV_OPTIONAL_COLUMNS];
+  const unknown = header.filter((h) => !known.includes(h));
+  if (unknown.length) throw new UsageError(`Batch CSV: unknown column(s) ${unknown.join(", ")}`);
+  const missing = CSV_REQUIRED_COLUMNS.filter((c) => !header.includes(c));
+  if (missing.length) throw new UsageError(`Batch CSV: missing column(s) ${missing.join(", ")}`);
+  if (new Set(header).size !== header.length) throw new UsageError("Batch CSV: duplicate column");
+
+  return rows.slice(1).map((cells, i) => {
+    if (cells.length !== header.length) {
+      throw new UsageError(`Batch CSV row ${i + 1}: expected ${header.length} fields, got ${cells.length}`);
+    }
+    const get = (column: string): string => {
+      const index = header.indexOf(column);
+      return index === -1 ? "" : cells[index].trim();
+    };
+    return {
+      network: get("network"),
+      token: get("token"),
+      tokenType: get("token_type"),
+      address: get("address"),
+      date: get("date"),
+      snapshot: get("snapshot"),
+      currency: get("currency"),
+    };
+  });
+}
+
+async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<number> {
+  const requests = readBatchRows(await readFile(csvPath, "utf8"));
+  if (requests.length === 0) throw new UsageError("Batch CSV has no data rows");
+  await mkdir(outDir, { recursive: true });
+
+  const loadAssets = assetMapLoader();
+  const summary: string[][] = [SUMMARY_HEADER];
+  const width = String(requests.length).length;
+  let failed = 0;
+
+  for (const [i, raw] of requests.entries()) {
+    const rowNo = String(i + 1).padStart(width, "0");
+    const label = `[${rowNo}/${requests.length}] ${raw.network} ${raw.token} ${raw.date} ${raw.snapshot}`;
+    const fileName = `${rowNo}-${safeFilePart(raw.network)}-${safeFilePart(raw.token)}-${safeFilePart(raw.date)}-${safeFilePart(raw.snapshot)}.pdf`;
+    const addressHash = await addressHashForReport(raw.address);
+    try {
+      const request = validateRequest(raw);
+      const result = await produceReport(rt, await loadAssets(), request, join(outDir, fileName));
+      summary.push([
+        rowNo,
+        request.network,
+        request.token,
+        result.assetType,
+        request.date,
+        request.snapshot,
+        String(result.blockNumber),
+        result.balance,
+        request.currency,
+        result.price === null ? "" : String(result.price),
+        result.value === null ? "" : result.value,
+        addressHash,
+        fileName,
+        "ok",
+        "",
+      ]);
+      process.stderr.write(`${label} ok\n`);
+    } catch (e) {
+      failed++;
+      summary.push([
+        rowNo,
+        raw.network,
+        raw.token,
+        raw.tokenType,
+        raw.date,
+        raw.snapshot,
+        "",
+        "",
+        raw.currency,
+        "",
+        "",
+        addressHash,
+        "",
+        "failed",
+        errorMessage(e),
+      ]);
+      process.stderr.write(`${label} FAILED: ${errorMessage(e)}\n`);
+    }
+  }
+
+  const summaryPath = join(outDir, "summary.csv");
+  await writeFile(summaryPath, formatCsv(summary));
+  process.stderr.write(
+    `${requests.length - failed} of ${requests.length} reports written, ${failed} failed. Summary: ${summaryPath}\n`,
+  );
+  return failed > 0 ? 1 : 0;
+}
+
+async function main(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    strict: true,
+    allowPositionals: false,
+    options: {
+      network: { type: "string" },
+      token: { type: "string" },
+      "token-type": { type: "string" },
+      address: { type: "string" },
+      date: { type: "string" },
+      snapshot: { type: "string" },
+      currency: { type: "string" },
+      "no-price": { type: "boolean" },
+      out: { type: "string" },
+      batch: { type: "string" },
+      "out-dir": { type: "string" },
+      "price-interval-ms": { type: "string" },
+      help: { type: "boolean" },
+    },
+  });
+
+  if (values.help) {
+    process.stdout.write(USAGE + "\n");
+    return 0;
+  }
+
+  let priceIntervalMs = DEFAULT_PRICE_INTERVAL_MS;
+  if (values["price-interval-ms"] !== undefined) {
+    priceIntervalMs = Number(values["price-interval-ms"]);
+    if (!Number.isInteger(priceIntervalMs) || priceIntervalMs < 0) {
+      throw new UsageError("--price-interval-ms must be a non-negative integer");
+    }
+  }
+
+  // Load .env from the working directory (the repo root under `npm run`)
+  // without overriding variables that are already set.
+  if (existsSync(".env")) process.loadEnvFile(".env");
+  const rt = createNodeRuntime({ priceIntervalMs, log: (m) => process.stderr.write(m + "\n") });
+
+  const singleOptions = ["network", "token", "token-type", "address", "date", "snapshot", "currency", "no-price", "out"] as const;
+
+  if (values.batch !== undefined) {
+    const used = singleOptions.filter((o) => values[o] !== undefined);
+    if (used.length) throw new UsageError(`--batch cannot be combined with --${used.join(", --")}`);
+    if (!values["out-dir"]) throw new UsageError("--batch requires --out-dir");
+    return runBatch(rt, values.batch, values["out-dir"]);
+  }
+
+  if (values["out-dir"] !== undefined) throw new UsageError("--out-dir is only valid with --batch");
+  if (values["no-price"] && values.currency !== undefined) {
+    throw new UsageError("Use either --currency or --no-price, not both");
+  }
+  const currency = values["no-price"] ? "none" : values.currency;
+  const required: Record<string, string | undefined> = {
+    network: values.network,
+    token: values.token,
+    address: values.address,
+    date: values.date,
+    snapshot: values.snapshot,
+    "currency (or --no-price)": currency,
+    out: values.out,
+  };
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => `--${k}`);
+  if (missing.length) throw new UsageError(`Missing ${missing.join(", ")}`);
+
+  return runSingle(
+    rt,
+    {
+      network: values.network!,
+      token: values.token!,
+      tokenType: values["token-type"] ?? "",
+      address: values.address!,
+      date: values.date!,
+      snapshot: values.snapshot!,
+      currency: currency!,
+    },
+    values.out!,
+  );
+}
+
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (e: unknown) => {
+    // Argument parsing errors from node:util are usage errors too.
+    const usage = e instanceof UsageError || (e instanceof TypeError && "code" in e);
+    process.stderr.write(`${errorMessage(e)}\n${usage ? `\n${USAGE}\n` : ""}`);
+    process.exitCode = usage ? 2 : 1;
+  },
+);

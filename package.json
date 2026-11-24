@@ -10,6 +10,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "build:cli": "vite build --ssr src/cli/report.ts --outDir dist-cli --emptyOutDir --logLevel warn",
+    "report": "npm run --silent build:cli && node dist-cli/report.js",
     "preview": "vite preview"
   },
   "dependencies": {

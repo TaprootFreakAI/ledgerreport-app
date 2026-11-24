@@ -50,6 +50,53 @@ npm run lint
 
 Both commands must be clean before pushing.
 
+## Headless reports
+
+The same balance, price and PDF code runs from the command line, without a
+browser. `npm run report` builds the CLI (`vite build --ssr` into
+`dist-cli/`) and runs it with Node. The Alchemy key is read from
+`VITE_ALCHEMY_API_KEY` in the environment or `.env` (needed for EVM chains
+only); `VITE_ESPLORA_URL` works as in the web app.
+
+Single report:
+
+```bash
+npm run report -- --network Ethereum --token USDT \
+  --address 0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe \
+  --date 2025-12-31 --snapshot end --currency CHF --out report.pdf
+```
+
+Batch, one PDF per row plus `summary.csv` (block number/height, balance,
+price, value, address hash and status/error per row):
+
+```bash
+npm run report -- --batch items.csv --out-dir reports/
+```
+
+```csv
+network,token,token_type,address,date,snapshot,currency
+Ethereum,ETH,,0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe,2025-12-31,end,none
+Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
+```
+
+- `network`: chain identifier as in the URL parameter (`Bitcoin`,
+  `Ethereum`, `BinanceSmartChain`, `Polygon`, `Arbitrum`, `Optimism`, `Base`,
+  `Haqq`, `Gnosis`).
+- `token`: asset name from the [DFX asset list](https://api.dfx.swiss/v1/asset),
+  matched exactly per chain like the `token` URL parameter. Optional
+  `token_type` / `--token-type` (`Coin` or `Token`) narrows the match; an
+  unknown or ambiguous token is an error.
+- `snapshot`: `start` or `end`; `currency`: `CHF`, `EUR`, `USD` or `none`
+  (`--no-price` in single mode) for a balance-only report without CoinGecko.
+
+Unlike the web app, the CLI never falls back to a current price: when the
+historical price is unavailable the report fails. A failed row gets no PDF,
+is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for
+usage errors). CoinGecko requests are spaced by `--price-interval-ms`
+(default 6000) and retried on HTTP 429; set `COINGECKO_DEMO_API_KEY` for a
+higher limit. Block numbers and prices are cached in memory for one run
+only. The PDF shows the address only as a hash, as in the web app.
+
 ## Icons
 
 `public/apple-touch-icon.png` is 180×180 PNG, regenerated from
