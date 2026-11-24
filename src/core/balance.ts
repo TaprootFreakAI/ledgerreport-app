@@ -322,10 +322,17 @@ const INVALID_HISTORY = "Invalid response from the Bitcoin data provider while r
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isSats = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
-// Esplora output types that have no address. Only these may come without
-// scriptpubkey_address; a missing address on any other (or a missing) type
-// is rejected, so an output to the wallet can never be skipped silently.
-const ADDRESSLESS_OUTPUT_TYPES = ["p2pk", "multisig", "op_return", "nonstandard", "provably_unspendable", "empty"];
+// scriptpubkey_type values that may come without scriptpubkey_address.
+// Source: TxOutValue::new in src/rest.rs of Blockstream/electrs and
+// mempool/electrs. The address is rust-bitcoin's Address::from_script, which
+// only exists for p2pkh, p2sh and witness programs (v0_p2wpkh, v0_p2wsh,
+// v1_p2tr, mempool's "anchor" = witness v1 P2A); it is absent for
+// "empty", "op_return", "p2pk", "multisig" (mempool), "provably_unspendable"
+// (Blockstream) and possibly "unknown" (non-standard scripts; a future witness
+// version would carry one). "fee" is Liquid-only. A missing address on any
+// other (or a missing) type is rejected, so an output to the wallet can never
+// be skipped silently.
+const ADDRESSLESS_OUTPUT_TYPES = ["empty", "op_return", "p2pk", "multisig", "provably_unspendable", "unknown"];
 
 function parseOutput(v: unknown): EsploraOutput {
   if (!isRecord(v) || !isSats(v.value)) throw new Error(INVALID_HISTORY);
