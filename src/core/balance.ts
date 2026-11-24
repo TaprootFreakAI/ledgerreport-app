@@ -474,7 +474,8 @@ async function fetchChainStats(rt: Runtime, walletAddress: string): Promise<Espl
     !stats ||
     !Number.isSafeInteger(stats.funded_txo_sum) ||
     !Number.isSafeInteger(stats.spent_txo_sum) ||
-    !Number.isSafeInteger(stats.tx_count)
+    !Number.isSafeInteger(stats.tx_count) ||
+    (stats.tx_count as number) < 0
   ) {
     throw new Error("Invalid Esplora address response");
   }
@@ -489,7 +490,21 @@ const sameStats = (a: EsploraChainStats, b: EsploraChainStats) =>
 // at or below targetHeight instead of walking the whole history. The only
 // other stop is an empty page (end of history): the page size is the
 // provider's choice, so a short page proves nothing and must not end the walk.
-async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeight: number): Promise<number> {
+//
+// An empty page is only trusted as the end of the history when the walk has
+// read exactly the confirmed tx_count of the address totals: electrs answers
+// [] also for a last_seen_txid it cannot resolve (Blockstream/electrs
+// src/new_index/schema.rs `_history`: unknown txid -> `return Ok(vec![])`;
+// mempool/electrs: skip_while consumes every row), and both electrs count
+// tx_count as the distinct txids of the same scripthash history rows the
+// /txs/chain pages list. A walk that stops at the snapshot height reads only
+// part of the history, so this count check cannot apply there.
+async function netSatsAfterHeight(
+  rt: Runtime,
+  walletAddress: string,
+  targetHeight: number,
+  expectedTxCount: number,
+): Promise<{ net: number; wholeHistory: boolean }> {
   let net = 0;
   let pages = 0;
   let lastSeenTxid: string | undefined;
@@ -498,9 +513,9 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
   // Guards the paging cursor: a provider that ignored it would return the
   // same transactions again and, without a size-based stop, never end.
   const seenTxids = new Set<string>();
-  const finish = () => {
+  const finish = (wholeHistory: boolean) => {
     if (pages >= ESPLORA_PROGRESS_EVERY_PAGES) rt.log(`Bitcoin history: done after ${pages} pages`);
-    return net;
+    return { net, wholeHistory };
   };
 
   while (true) {
@@ -510,7 +525,10 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
       : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
     const page = parseEsploraPage(await esploraAddressJson(rt, url));
     pages++;
-    if (page.length === 0) return finish();
+    if (page.length === 0) {
+      if (txCount !== expectedTxCount) throw new Error(INVALID_HISTORY);
+      return finish(true);
+    }
     txCount += page.length;
     if (pages % ESPLORA_PROGRESS_EVERY_PAGES === 0) {
       rt.log(`Bitcoin history: ${pages} pages (${txCount} transactions) read`);
@@ -526,7 +544,7 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
         throw new Error("Esplora transaction history is not ordered newest-first");
       }
       previousHeight = height;
-      if (height <= targetHeight) return finish();
+      if (height <= targetHeight) return finish(false);
 
       // Every TX Esplora lists under /address/{a}/txs pays to or spends
       // from that address, so at least one output or spent prevout must
@@ -589,7 +607,12 @@ async function fetchBitcoinBalance(
   // request throws — a partially read history never yields a number.
   for (let attempt = 1; attempt <= BTC_SNAPSHOT_ATTEMPTS; attempt++) {
     const before = await fetchChainStats(rt, walletAddress);
-    const netAfter = await netSatsAfterHeight(rt, walletAddress, targetHeight);
+    const { net: netAfter, wholeHistory } = await netSatsAfterHeight(
+      rt,
+      walletAddress,
+      targetHeight,
+      before.tx_count,
+    );
     const after = await fetchChainStats(rt, walletAddress);
     if (!sameStats(before, after)) {
       rt.log("Bitcoin address received new transactions while reading its history, reading again");
@@ -600,6 +623,9 @@ async function fetchBitcoinBalance(
     // All terms are validated safe integers; this also guards the arithmetic
     // so that no NaN or rounded value can ever be formatted into a report.
     if (!Number.isSafeInteger(satsBalance)) throw new Error(INVALID_HISTORY);
+    // The whole history lies after the snapshot, so the address held nothing
+    // at that height: totals and transactions must cancel out exactly.
+    if (wholeHistory && satsBalance !== 0) throw new Error(INVALID_HISTORY);
     if (satsBalance < 0) {
       throw new Error("Computed negative Bitcoin balance — chain data inconsistent");
     }
