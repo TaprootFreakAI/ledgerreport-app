@@ -16,6 +16,15 @@ import { useWalletBalance } from "./hooks/useWalletBalance";
 import { useCurrencyPrice } from "./hooks/useCurrencyPrice";
 import { generateWalletBalancePDF } from "./utils/pdfGenerator";
 import { blockchainLabel } from "./utils/blockchainLabel";
+import {
+  END_OF_DAY_NOT_REACHED_MESSAGE,
+  SNAPSHOTS,
+  SNAPSHOT_LABEL,
+  SNAPSHOT_UTC_TIME,
+  isParsableDay,
+  isSnapshot,
+  snapshotNotReached,
+} from "./utils/snapshot";
 
 import {
   EvmBlockchain,
@@ -24,11 +33,13 @@ import {
   type Asset,
   type Blockchain,
   type Currency,
+  type Snapshot,
   type SupportedAsset,
 } from "./types";
 
 type FormData = {
   date: string;
+  snapshot: Snapshot;
   network: Blockchain;
   asset: SupportedAsset;
   address: string;
@@ -79,6 +90,10 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
   const [assetMap, setAssetMap] = useState<AssetMap | undefined>();
+  // Kept apart from `error`: the form-change watcher clears `error` on every
+  // field update, but an invalid `?snapshot=` must stay visible until the
+  // user explicitly picks Start of day or End of day.
+  const [snapshotParamError, setSnapshotParamError] = useState<string | undefined>();
 
   // Section-heading IDs let us bind each form control to its label via
   // aria-labelledby — keyboard and screen-reader users get a proper
@@ -87,6 +102,8 @@ export default function App() {
   const blockchainHeadingId = useId();
   const tokenHeadingId = useId();
   const dateHeadingId = useId();
+  const snapshotHintId = useId();
+  const snapshotErrorId = useId();
   const currencyHeadingId = useId();
 
   const [urlParams] = useSearchParams();
@@ -108,6 +125,9 @@ export default function App() {
       // Default to 31 December of the previous year — the wealth-tax record
       // date in Switzerland, which is the primary use case for this tool.
       date: `${new Date().getFullYear() - 1}-12-31`,
+      // End of day: the year-end record needs the balance after the last
+      // block of 31 December, not the one at 00:00:00 UTC.
+      snapshot: "end",
     },
   });
 
@@ -136,6 +156,19 @@ export default function App() {
   const selectedNetwork = watch("network");
   const selectedAsset = watch("asset");
   const selectedCurrency = watch("currency");
+  const selectedDate = watch("date");
+  const selectedSnapshot = watch("snapshot");
+
+  // End of day for today (or any day whose 23:59:59 UTC is still ahead) does
+  // not exist on chain yet; the lookup would return the current balance.
+  // An unparseable date is skipped here because DateInput already reports it
+  // and blocks submit.
+  const snapshotError =
+    selectedSnapshot === "end" &&
+    isParsableDay(selectedDate) &&
+    snapshotNotReached(selectedDate, selectedSnapshot, Date.now())
+      ? END_OF_DAY_NOT_REACHED_MESSAGE
+      : undefined;
 
   // Load the supported asset list from the DFX backend and group by chain.
   useEffect(() => {
@@ -204,6 +237,22 @@ export default function App() {
     }
   }, [urlParams]);
 
+  // `?snapshot=start|end`. Any other value (including an empty one) is an
+  // error rather than being replaced by the default.
+  useEffect(() => {
+    const snapshotParam = urlParams.get("snapshot");
+    if (snapshotParam === null) return;
+
+    if (isSnapshot(snapshotParam)) {
+      setSnapshotParamError(undefined);
+      setValue("snapshot", snapshotParam);
+    } else {
+      setSnapshotParamError(
+        `Invalid snapshot in URL parameter: "${snapshotParam}" — use "start" or "end".`,
+      );
+    }
+  }, [urlParams, setValue]);
+
   useEffect(() => {
     const tokenParam = urlParams.get("token");
     if (!tokenParam) return;
@@ -248,13 +297,14 @@ export default function App() {
 
   async function onSubmit(data: FormData) {
     setError(undefined);
-    const { date, address, network, asset } = data;
+    const { date, snapshot, address, network, asset } = data;
 
     try {
       await fetchBalance({
         asset,
         walletAddress: address,
         timestamp: date,
+        snapshot,
       });
 
       await fetchPrice({
@@ -287,7 +337,7 @@ export default function App() {
     : [];
 
   const isFetching = balanceLoading || priceLoading;
-  const visibleError = balanceError || priceError || error || undefined;
+  const visibleError = balanceError || priceError || error || snapshotParamError || undefined;
 
   return (
     <div className="flex min-h-screen flex-col bg-neutral-150">
@@ -343,6 +393,27 @@ export default function App() {
 
             <SectionRow title="Balance Date" headingId={dateHeadingId}>
               <DateInput register={register} errors={errors} ariaLabelledBy={dateHeadingId} />
+              <div className="mt-2 w-full">
+                <SegmentedControl<Snapshot>
+                  options={SNAPSHOTS.map((s) => ({ value: s, label: SNAPSHOT_LABEL[s] }))}
+                  value={selectedSnapshot}
+                  onChange={(value) => {
+                    setSnapshotParamError(undefined);
+                    setValue("snapshot", value);
+                  }}
+                  layout="equal"
+                  ariaLabelledBy={dateHeadingId}
+                  ariaDescribedBy={snapshotError ? `${snapshotHintId} ${snapshotErrorId}` : snapshotHintId}
+                />
+                <p id={snapshotHintId} className="mt-1 px-2.5 text-xs font-medium text-neutral-700">
+                  Balance as of {SNAPSHOT_UTC_TIME[selectedSnapshot]} on the selected date.
+                </p>
+                {snapshotError && (
+                  <p id={snapshotErrorId} className="mt-1 px-2.5 text-xs font-medium text-red-500">
+                    {snapshotError}
+                  </p>
+                )}
+              </div>
             </SectionRow>
 
             <SectionRow title="Currency" variant="last" headingId={currencyHeadingId}>
@@ -362,7 +433,7 @@ export default function App() {
                 prices={prices}
                 currency={selectedCurrency}
                 isFetching={isFetching}
-                canSubmit={isValid && !visibleError}
+                canSubmit={isValid && !visibleError && !snapshotError}
                 onSubmit={handleSubmit(onSubmit)}
                 onGeneratePdf={generatePDF}
                 errorMessage={visibleError}

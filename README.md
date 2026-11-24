@@ -6,6 +6,13 @@ date, and get a downloadable PDF with the on-chain balance and its fiat
 value (CHF/EUR/USD) on that day. Swiss wealth-tax filings use the official
 ESTV ICTax CHF rate when one is published for the requested year-end.
 
+The balance is taken at a chosen instant of the date (UTC): **End of day**
+(23:59:59 UTC, default — the year-end record date) or **Start of day**
+(00:00:00 UTC). The report uses the last block at or before that instant and
+states the snapshot below the date. End of day is only available once that
+day is over in UTC. URL parameters: `network`, `token`, `address`, `date`
+(`YYYY-MM-DD`) and `snapshot` (`start` or `end`).
+
 ## Live
 
 - Production: <https://ledgerreport.com>

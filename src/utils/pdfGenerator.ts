@@ -1,7 +1,8 @@
 import jsPDF from "jspdf";
-import type { Blockchain, Currency, SupportedAsset } from "../types";
+import type { Blockchain, Currency, Snapshot, SupportedAsset } from "../types";
 import { formatSwissNumber } from "./formatNumber";
 import { blockchainLabel } from "./blockchainLabel";
+import { snapshotDescription } from "./snapshot";
 
 const hashAddress = async (address: string): Promise<string> => {
   const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(address));
@@ -51,6 +52,7 @@ const svgToPngDataUrl = async (
 interface PDFParams {
   formData: {
     date: string;
+    snapshot: Snapshot;
     network: Blockchain;
     asset: SupportedAsset;
     address: string;
@@ -160,6 +162,12 @@ export const generateWalletBalancePDF = async ({
   // tax document.
   doc.text("Date:", labelX, y);
   doc.text(dateSwiss, valueX, y);
+  y += rowGap;
+
+  // The calendar day alone is ambiguous: state which instant of it (UTC)
+  // the balance refers to.
+  doc.text("Snapshot:", labelX, y);
+  doc.text(snapshotDescription(formData.snapshot), valueX, y);
   y += rowGap;
 
   doc.text("Network:", labelX, y);

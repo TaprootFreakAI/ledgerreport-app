@@ -6,9 +6,11 @@ import {
   NonEvmBlockchain,
   isBtcBlockchain,
   isEvmBlockchain,
+  type Snapshot,
   type SupportedAsset,
 } from "../types";
 import { formatTokenAmount } from "../utils/formatNumber";
+import { END_OF_DAY_NOT_REACHED_MESSAGE, snapshotTimestamp } from "../utils/snapshot";
 import { cacheKey } from "../utils/cacheKey";
 import { blockchainLabel } from "../utils/blockchainLabel";
 
@@ -22,6 +24,7 @@ interface FetchBalanceParams {
   asset: SupportedAsset;
   walletAddress: string;
   timestamp: string;
+  snapshot: Snapshot;
 }
 
 const apiKey = import.meta.env.VITE_ALCHEMY_API_KEY || "YOUR_ALCHEMY_API_KEY";
@@ -54,15 +57,23 @@ export const useWalletBalance = () => {
     [],
   );
 
-  const fetchBalance = useCallback(async ({ asset, walletAddress, timestamp }: FetchBalanceParams) => {
+  const fetchBalance = useCallback(async ({ asset, walletAddress, timestamp, snapshot }: FetchBalanceParams) => {
     setResult({ balance: null, loading: true, error: null });
 
     try {
-      const targetDate = new Date(timestamp + "T00:00:00Z");
-      if (isNaN(targetDate.getTime())) {
-        throw new Error(`Invalid date: ${timestamp}`);
+      // "start" = 00:00:00 UTC (unchanged behaviour), "end" = 23:59:59 UTC.
+      // The block lookups below resolve the last block at or before this
+      // instant, and their caches are keyed by it, so both modes never share
+      // a cache entry.
+      const targetTimestamp = snapshotTimestamp(timestamp, snapshot);
+
+      // An end-of-day instant in the future (e.g. today) would silently
+      // resolve to the chain tip, i.e. the current balance. Refuse instead.
+      // The form blocks this case too; this guard covers every other caller.
+      // "start" is left untouched: future dates are rejected by DateInput.
+      if (snapshot === "end" && targetTimestamp * 1000 > Date.now()) {
+        throw new Error(END_OF_DAY_NOT_REACHED_MESSAGE);
       }
-      const targetTimestamp = Math.floor(targetDate.getTime() / 1000);
 
       let balance: string;
       if (isBtcBlockchain(asset.blockchain)) {
@@ -336,6 +347,10 @@ async function findBtcBlockByTimestamp(targetTimestamp: number): Promise<number>
     if (!isNaN(parsed)) return parsed;
   }
 
+  // mempool.space answers with the block whose timestamp is the latest one
+  // at or before targetTimestamp (`WHERE blockTimestamp <= ? ORDER BY
+  // blockTimestamp DESC LIMIT 1`), so both the 00:00:00 and the 23:59:59
+  // snapshot resolve to the last block at or before that instant.
   let res: Response;
   try {
     res = await fetch(`${ESPLORA_BASE}/v1/mining/blocks/timestamp/${targetTimestamp}`);
