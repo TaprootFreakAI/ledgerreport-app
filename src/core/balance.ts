@@ -90,13 +90,17 @@ export async function evmRpc(
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       });
       if (response.ok) {
-        const data = await response.json();
-        const error = data?.error as { code?: unknown; message?: unknown } | undefined;
-        if (!error) return data?.result;
-        if (!EVM_RETRY_RPC_CODES.includes(Number(error.code))) {
-          throw new Error(`${context}: ${String(error.message)}`);
+        const data: unknown = await response.json();
+        if (typeof data !== "object" || data === null) {
+          throw new Error(`${context}: unexpected response from Alchemy on ${label}`);
         }
-        reason = `rate limit (${String(error.message)})`;
+        const { error, result } = data as { error?: unknown; result?: unknown };
+        if (error === undefined || error === null) return result;
+        const { code, message } = (typeof error === "object" ? error : {}) as { code?: unknown; message?: unknown };
+        if (!EVM_RETRY_RPC_CODES.includes(Number(code))) {
+          throw new Error(`${context}: ${String(message)}`);
+        }
+        reason = `rate limit (${String(message)})`;
       } else if (EVM_RETRY_STATUSES.includes(response.status)) {
         reason = `HTTP ${response.status}`;
         requestedWait = retryAfterMs(response.headers.get("retry-after"));
