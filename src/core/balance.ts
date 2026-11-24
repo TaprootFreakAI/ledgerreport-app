@@ -322,10 +322,21 @@ const INVALID_HISTORY = "Invalid response from the Bitcoin data provider while r
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isSats = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
+// Esplora output types that have no address. Only these may come without
+// scriptpubkey_address; a missing address on any other (or a missing) type
+// is rejected, so an output to the wallet can never be skipped silently.
+const ADDRESSLESS_OUTPUT_TYPES = ["p2pk", "multisig", "op_return", "nonstandard", "provably_unspendable", "empty"];
+
 function parseOutput(v: unknown): EsploraOutput {
   if (!isRecord(v) || !isSats(v.value)) throw new Error(INVALID_HISTORY);
   const address = v.scriptpubkey_address;
-  if (address !== undefined && typeof address !== "string") throw new Error(INVALID_HISTORY);
+  if (address === undefined) {
+    if (typeof v.scriptpubkey_type !== "string" || !ADDRESSLESS_OUTPUT_TYPES.includes(v.scriptpubkey_type)) {
+      throw new Error(INVALID_HISTORY);
+    }
+  } else if (typeof address !== "string") {
+    throw new Error(INVALID_HISTORY);
+  }
   return { address, value: v.value };
 }
 
@@ -349,9 +360,16 @@ function parseEsploraPage(data: unknown): EsploraTx[] {
     if (!Array.isArray(tx.vout) || !Array.isArray(tx.vin)) throw new Error(INVALID_HISTORY);
     const prevouts: EsploraOutput[] = [];
     for (const input of tx.vin) {
-      if (!isRecord(input)) throw new Error(INVALID_HISTORY);
-      // Coinbase inputs spend no previous output (prevout null).
-      if (input.prevout !== null && input.prevout !== undefined) prevouts.push(parseOutput(input.prevout));
+      if (!isRecord(input) || typeof input.is_coinbase !== "boolean") throw new Error(INVALID_HISTORY);
+      // Only a coinbase input spends no previous output; Esplora sends it
+      // with is_coinbase true and prevout null. Every other input must carry
+      // a valid prevout (parseOutput throws on a missing or malformed one),
+      // otherwise a spend from the wallet would silently not be deducted.
+      if (input.is_coinbase) {
+        if (input.prevout !== null) throw new Error(INVALID_HISTORY);
+      } else {
+        prevouts.push(parseOutput(input.prevout));
+      }
     }
     return { txid: tx.txid, blockHeight: height, vout: tx.vout.map(parseOutput), prevouts };
   });
