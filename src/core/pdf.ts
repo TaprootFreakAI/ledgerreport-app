@@ -1,6 +1,7 @@
 import { jsPDF } from "jspdf";
 import type { Blockchain, Currency, Snapshot } from "../types";
 import { formatSwissNumber } from "../utils/formatNumber";
+import { formatSwissDecimal, multiplyToCents, numberToDecimalString } from "../utils/decimal";
 import { blockchainLabel } from "../utils/blockchainLabel";
 import { snapshotDescription } from "../utils/snapshot";
 import { canonicalBitcoinAddress } from "../utils/bitcoinAddress";
@@ -22,6 +23,14 @@ export type ReportPrice =
   // so in its own row. exactText is the validated input, printed unchanged
   // so the value row can be recomputed from the printed price.
   | (ReportPriceBase & { supplied: true; exactText: string });
+
+// The report value: balance × price computed exactly in decimal and rounded
+// once, half-up, to 2 decimals ("1862299.98"). The PDF, summary.csv and
+// stdout all use this one result. A supplied price enters as its exact text,
+// a looked-up price as the decimal expansion of its number.
+export function reportValue(balance: string, price: ReportPrice): string {
+  return multiplyToCents(balance, price.supplied ? price.exactText : numberToDecimalString(price.value));
+}
 
 // The looked-up price for the chosen currency.
 export function reportPriceFromQuote(quote: PriceQuote, currency: Currency): ReportPrice {
@@ -191,7 +200,7 @@ export async function buildWalletBalancePdf({
   }
 
   doc.text(`In ${price.currency}:`, labelX, y);
-  doc.text(formatSwissNumber(parseFloat(balance) * price.value), valueX, y);
+  doc.text(formatSwissDecimal(reportValue(balance, price)), valueX, y);
   y += rowGap;
 
   // Add horizontal line below data section

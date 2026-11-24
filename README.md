@@ -15,7 +15,9 @@ chains a block after the instant must exist, on Bitcoin 2 hours must have
 passed (block timestamps can lag real time, in practice by well under 2
 hours, so a Bitcoin snapshot is only reported 2 hours after the instant).
 
-Every report carries a historical price and names it in the PDF. CoinGecko's
+Every report carries a historical price and names it in the PDF. The value
+is balance × price computed exactly in decimal and rounded once to 2
+decimals, half-up (a half cent rounds up). CoinGecko's
 history value for a day is the price at 00:00:00 UTC of that day, so Start
 of day uses the date itself and End of day the following day (one second
 after the snapshot). For BTC in CHF at End of day the official ESTV

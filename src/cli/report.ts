@@ -9,7 +9,13 @@ import { blockchainLabel } from "../utils/blockchainLabel";
 import { fetchAssetMap, resolveAsset, type AssetMap, type AssetType } from "../core/assets";
 import { fetchWalletBalance } from "../core/balance";
 import { fetchCurrencyPrice } from "../core/price";
-import { addressHashForReport, buildWalletBalancePdf, reportPriceFromQuote, type ReportPrice } from "../core/pdf";
+import {
+  addressHashForReport,
+  buildWalletBalancePdf,
+  reportPriceFromQuote,
+  reportValue,
+  type ReportPrice,
+} from "../core/pdf";
 import type { Runtime } from "../core/runtime";
 import { createNodeRuntime } from "./nodeRuntime";
 import { formatCsv, parseCsv } from "./csv";
@@ -216,7 +222,7 @@ async function produceReport(
         }),
         request.currency,
       );
-  const value = (parseFloat(balance) * price.value).toFixed(2);
+  const value = reportValue(balance, price);
 
   // Only reached when balance and price are known — a failed lookup above
   // throws and no PDF is written.
