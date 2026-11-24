@@ -10,7 +10,17 @@ The balance is taken at a chosen instant of the date (UTC): **End of day**
 (23:59:59 UTC, default — the year-end record date) or **Start of day**
 (00:00:00 UTC). The report uses the last block at or before that instant and
 states the snapshot below the date. End of day is only available once that
-day is over in UTC. URL parameters: `network`, `token`, `address`, `date`
+day is over in UTC.
+
+Every report carries a historical price and names it in the PDF. CoinGecko's
+history value for a day is the price at 00:00:00 UTC of that day, so Start
+of day uses the date itself and End of day the following day (one second
+after the snapshot). For BTC in CHF the official ESTV year-end rate takes
+precedence where published. FPS uses its contract `price()` at the snapshot
+block. There is no fallback to today's price: a token CoinGecko does not
+list, a day it has no data for, or a price not yet published (End of day
+of yesterday before about 01:00 UTC) is an error. CoinGecko's public API
+only serves the last 365 days. URL parameters: `network`, `token`, `address`, `date`
 (`YYYY-MM-DD`) and `snapshot` (`start` or `end`).
 
 ## Live
@@ -23,8 +33,8 @@ day is over in UTC. URL parameters: `network`, `token`, `address`, `date`
 - Vite + React 19 + Tailwind 4 (TypeScript, strict mode)
 - Bitcoin balances via mempool.space Esplora (override with `VITE_ESPLORA_URL`)
 - EVM balances via Alchemy (requires `VITE_ALCHEMY_API_KEY`)
-- Prices via CoinGecko (`/coins/.../history` for the snapshot date,
-  `/simple/token_price` fallback for newer tokens)
+- Prices via CoinGecko `/coins/{id}/history` (token contracts resolved to
+  their coin id via `/coins/{platform}/contract/{address}`)
 - ESTV ICTax CHF override on known Swiss year-end record dates
 
 Supports 8 EVM chains today: Ethereum, BNB Smart Chain, Polygon, Arbitrum,
@@ -67,7 +77,7 @@ npm run report -- --network Ethereum --token USDT \
 ```
 
 Batch, one PDF per row plus `summary.csv` (block number/height, balance,
-price, value, address hash and status/error per row):
+price and its source, value, address hash and status/error per row):
 
 ```bash
 npm run report -- --batch items.csv --out-dir reports/
@@ -75,7 +85,7 @@ npm run report -- --batch items.csv --out-dir reports/
 
 ```csv
 network,token,token_type,address,date,snapshot,currency
-Ethereum,ETH,,0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe,2025-12-31,end,none
+Ethereum,ETH,,0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe,2025-12-31,end,CHF
 Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
 ```
 
@@ -86,14 +96,13 @@ Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
   matched exactly per chain like the `token` URL parameter. Optional
   `token_type` / `--token-type` (`Coin` or `Token`) narrows the match; an
   unknown or ambiguous token is an error.
-- `snapshot`: `start` or `end`; `currency`: `CHF`, `EUR`, `USD` or `none`
-  (`--no-price` in single mode) for a balance-only report without CoinGecko.
+- `snapshot`: `start` or `end`; `currency`: `CHF`, `EUR` or `USD`.
 
-Unlike the web app, the CLI never falls back to a current price: when the
-historical price is unavailable the report fails. A failed row gets no PDF,
+When the historical price is unavailable the report fails. A failed row gets no PDF,
 is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for
 usage errors). CoinGecko requests are spaced by `--price-interval-ms`
-(default 6000) and retried on HTTP 429; set `COINGECKO_DEMO_API_KEY` for a
+(default 6000) and retried on HTTP 429; a coin id and its price are
+fetched once per run even when several chains share them; set `COINGECKO_DEMO_API_KEY` for a
 higher limit. Bitcoin balances read only the transactions after the
 snapshot block (current confirmed totals minus everything newer), with
 paced page requests and retries on HTTP 429/5xx; a history that cannot be

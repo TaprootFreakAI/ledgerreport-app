@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import type { Snapshot, SupportedAsset } from "../types";
-import { fetchWalletBalance } from "../core/balance";
+import { fetchWalletBalance, type BalanceAtBlock } from "../core/balance";
 import { browserRuntime } from "../browserRuntime";
 
 interface BalanceResult {
@@ -30,17 +30,19 @@ export const useWalletBalance = () => {
     [],
   );
 
-  const fetchBalance = useCallback(async ({ asset, walletAddress, timestamp, snapshot }: FetchBalanceParams) => {
+  const fetchBalance = useCallback(async ({ asset, walletAddress, timestamp, snapshot }: FetchBalanceParams): Promise<BalanceAtBlock> => {
     setResult({ balance: null, loading: true, error: null });
 
     try {
-      const { balance } = await fetchWalletBalance(browserRuntime, {
+      const result = await fetchWalletBalance(browserRuntime, {
         asset,
         walletAddress,
         date: timestamp,
         snapshot,
       });
-      setResult({ balance, loading: false, error: null });
+      setResult({ balance: result.balance, loading: false, error: null });
+      // The block is needed by the price lookup (FPS reads its price there).
+      return result;
     } catch (error: unknown) {
       setResult({
         balance: null,

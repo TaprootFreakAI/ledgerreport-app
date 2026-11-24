@@ -7,7 +7,7 @@ import { isSupportedBlockchain, type Blockchain, type Currency, type Snapshot } 
 import { isParsableDay, isSnapshot } from "../utils/snapshot";
 import { fetchAssetMap, resolveAsset, type AssetMap, type AssetType } from "../core/assets";
 import { fetchWalletBalance } from "../core/balance";
-import { fetchCurrencyPrice, type PriceData } from "../core/price";
+import { fetchCurrencyPrice, type PriceCurrency } from "../core/price";
 import { addressHashForReport, buildWalletBalancePdf } from "../core/pdf";
 import type { Runtime } from "../core/runtime";
 import { createNodeRuntime } from "./nodeRuntime";
@@ -19,7 +19,7 @@ import { formatCsv, parseCsv } from "./csv";
 const USAGE = `Usage:
   npm run report -- --network <chain> --token <name> [--token-type Coin|Token]
                     --address <address> --date YYYY-MM-DD --snapshot start|end
-                    (--currency CHF|EUR|USD|none | --no-price) --out <file.pdf>
+                    --currency CHF|EUR|USD --out <file.pdf>
 
   npm run report -- --batch <items.csv> --out-dir <dir>
 
@@ -46,6 +46,7 @@ const SUMMARY_HEADER = [
   "balance",
   "currency",
   "price",
+  "price_source",
   "value",
   "address_hash",
   "pdf",
@@ -54,8 +55,6 @@ const SUMMARY_HEADER = [
 ];
 
 class UsageError extends Error {}
-
-type ReportCurrency = Currency | "none";
 
 // One requested report exactly as given (CLI flags or one CSV row).
 interface RawRequest {
@@ -75,15 +74,16 @@ interface ValidRequest {
   address: string;
   date: string;
   snapshot: Snapshot;
-  currency: ReportCurrency;
+  currency: Currency;
 }
 
 interface ReportResult {
   assetType: string;
   blockNumber: number;
   balance: string;
-  price: number | null;
-  value: string | null;
+  price: number;
+  priceSource: string;
+  value: string;
 }
 
 function validateRequest(raw: RawRequest): ValidRequest {
@@ -102,8 +102,8 @@ function validateRequest(raw: RawRequest): ValidRequest {
   if (!isSnapshot(raw.snapshot)) {
     throw new Error(`Invalid snapshot "${raw.snapshot}" — use "start" or "end"`);
   }
-  if (!["CHF", "EUR", "USD", "none"].includes(raw.currency)) {
-    throw new Error(`Invalid currency "${raw.currency}" — use CHF, EUR, USD or none`);
+  if (!["CHF", "EUR", "USD"].includes(raw.currency)) {
+    throw new Error(`Invalid currency "${raw.currency}" — use CHF, EUR or USD`);
   }
 
   let tokenType: AssetType | undefined;
@@ -119,7 +119,7 @@ function validateRequest(raw: RawRequest): ValidRequest {
     address: raw.address,
     date: raw.date,
     snapshot: raw.snapshot,
-    currency: raw.currency as ReportCurrency,
+    currency: raw.currency as Currency,
   };
 }
 
@@ -138,26 +138,19 @@ async function produceReport(
     snapshot: request.snapshot,
   });
 
-  let prices: PriceData | null = null;
-  let price: number | null = null;
-  let value: string | null = null;
-  const currency = request.currency;
-  if (currency !== "none") {
-    // Same contract address as the form passes; historicalOnly makes every
-    // path that would return today's price an error.
-    prices = await fetchCurrencyPrice(rt, {
-      contractAddress: asset.chainId,
-      isNativeCoin: asset.type === "Coin",
-      blockchain: request.network,
-      date: request.date,
-      historicalOnly: true,
-    });
-    price = prices[currency.toLowerCase() as keyof PriceData];
-    value = (parseFloat(balance) * price).toFixed(2);
-  }
+  const prices = await fetchCurrencyPrice(rt, {
+    asset,
+    blockchain: request.network,
+    date: request.date,
+    snapshot: request.snapshot,
+    blockNumber,
+  });
+  const key = request.currency.toLowerCase() as PriceCurrency;
+  const price = prices[key];
+  const value = (parseFloat(balance) * price).toFixed(2);
 
-  // Only reached when balance (and price, if requested) are known — a failed
-  // lookup above throws and no PDF is written.
+  // Only reached when balance and price are known — a failed lookup above
+  // throws and no PDF is written.
   const doc = await buildWalletBalancePdf({
     formData: {
       date: request.date,
@@ -168,13 +161,11 @@ async function produceReport(
     },
     balance,
     prices,
-    // The PDF prints a fiat row only when prices are given; the currency is
-    // irrelevant for a balance-only report.
-    selectedCurrency: currency === "none" ? "CHF" : currency,
+    selectedCurrency: request.currency,
   });
   await writeFile(outFile, new Uint8Array(doc.output("arraybuffer")));
 
-  return { assetType: asset.type ?? "", blockNumber, balance, price, value };
+  return { assetType: asset.type ?? "", blockNumber, balance, price, priceSource: prices.source[key], value };
 }
 
 function errorMessage(e: unknown): string {
@@ -206,13 +197,11 @@ async function runSingle(rt: Runtime, raw: RawRequest, outFile: string): Promise
       `date:         ${request.date} (${request.snapshot} of day, UTC)`,
       `block:        ${result.blockNumber}`,
       `balance:      ${result.balance}`,
-      result.price === null
-        ? "price:        not requested"
-        : `price:        ${result.price} ${request.currency}`,
-      result.value === null ? null : `value:        ${result.value} ${request.currency}`,
+      `price:        ${result.price} ${request.currency} (${result.priceSource})`,
+      `value:        ${result.value} ${request.currency}`,
       `address hash: ${await addressHashForReport(request.address)}`,
       `pdf:          ${outFile}`,
-    ].filter((l): l is string => l !== null);
+    ];
     process.stdout.write(lines.join("\n") + "\n");
     return 0;
   } catch (e) {
@@ -280,8 +269,9 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<n
         String(result.blockNumber),
         result.balance,
         request.currency,
-        result.price === null ? "" : String(result.price),
-        result.value === null ? "" : result.value,
+        String(result.price),
+        result.priceSource,
+        result.value,
         addressHash,
         fileName,
         "ok",
@@ -300,6 +290,7 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<n
         "",
         "",
         raw.currency,
+        "",
         "",
         "",
         addressHash,
@@ -332,7 +323,6 @@ async function main(argv: string[]): Promise<number> {
       date: { type: "string" },
       snapshot: { type: "string" },
       currency: { type: "string" },
-      "no-price": { type: "boolean" },
       out: { type: "string" },
       batch: { type: "string" },
       "out-dir": { type: "string" },
@@ -359,7 +349,7 @@ async function main(argv: string[]): Promise<number> {
   if (existsSync(".env")) process.loadEnvFile(".env");
   const rt = createNodeRuntime({ priceIntervalMs, log: (m) => process.stderr.write(m + "\n") });
 
-  const singleOptions = ["network", "token", "token-type", "address", "date", "snapshot", "currency", "no-price", "out"] as const;
+  const singleOptions = ["network", "token", "token-type", "address", "date", "snapshot", "currency", "out"] as const;
 
   if (values.batch !== undefined) {
     const used = singleOptions.filter((o) => values[o] !== undefined);
@@ -369,17 +359,14 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (values["out-dir"] !== undefined) throw new UsageError("--out-dir is only valid with --batch");
-  if (values["no-price"] && values.currency !== undefined) {
-    throw new UsageError("Use either --currency or --no-price, not both");
-  }
-  const currency = values["no-price"] ? "none" : values.currency;
+  const currency = values.currency;
   const required: Record<string, string | undefined> = {
     network: values.network,
     token: values.token,
     address: values.address,
     date: values.date,
     snapshot: values.snapshot,
-    "currency (or --no-price)": currency,
+    currency,
     out: values.out,
   };
   const missing = Object.entries(required)

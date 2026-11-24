@@ -257,7 +257,7 @@ export default function App() {
     const { date, snapshot, address, network, asset } = data;
 
     try {
-      await fetchBalance({
+      const { blockNumber } = await fetchBalance({
         asset,
         walletAddress: address,
         timestamp: date,
@@ -265,10 +265,11 @@ export default function App() {
       });
 
       await fetchPrice({
-        contractAddress: asset.chainId,
-        isNativeCoin: asset.type === "Coin",
+        asset,
         blockchain: network,
         date,
+        snapshot,
+        blockNumber,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

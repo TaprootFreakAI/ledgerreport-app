@@ -43,7 +43,7 @@ const evmRpcHost: Record<EvmBlockchain, string> = {
   [EvmBlockchain.GNOSIS]: "gnosis-mainnet",
 };
 
-function evmRpcUrl(rt: Runtime, blockchain: EvmBlockchain): string {
+export function evmRpcUrl(rt: Runtime, blockchain: EvmBlockchain): string {
   return `https://${evmRpcHost[blockchain]}.g.alchemy.com/v2/${rt.getAlchemyApiKey()}`;
 }
 

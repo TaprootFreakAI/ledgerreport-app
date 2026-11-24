@@ -1,24 +1,15 @@
 import { useState, useCallback } from "react";
-import type { Blockchain } from "../types";
-import { fetchCurrencyPrice, type PriceData } from "../core/price";
+import { fetchCurrencyPrice, type FetchPriceParams, type PriceQuote } from "../core/price";
 import { browserRuntime } from "../browserRuntime";
 
 interface CurrencyPriceResult {
-  prices: PriceData | null;
+  prices: PriceQuote | null;
   loading: boolean;
   error: string | null;
 }
 
-interface FetchPriceParams {
-  contractAddress?: string;
-  isNativeCoin: boolean;
-  blockchain: Blockchain;
-  date: string;
-}
-
 // Thin React wrapper around src/core/price.ts (shared with the headless CLI):
-// tracks loading/error state for the form. The browser keeps the existing
-// price fallbacks (historicalOnly: false).
+// tracks loading/error state for the form.
 export const useCurrencyPrice = () => {
   const [result, setResult] = useState<CurrencyPriceResult>({
     prices: null,
@@ -26,17 +17,11 @@ export const useCurrencyPrice = () => {
     error: null,
   });
 
-  const fetchPrice = useCallback(async ({ contractAddress, isNativeCoin, blockchain, date }: FetchPriceParams) => {
+  const fetchPrice = useCallback(async (params: FetchPriceParams) => {
     setResult({ prices: null, loading: true, error: null });
 
     try {
-      const prices = await fetchCurrencyPrice(browserRuntime, {
-        contractAddress,
-        isNativeCoin,
-        blockchain,
-        date,
-        historicalOnly: false,
-      });
+      const prices = await fetchCurrencyPrice(browserRuntime, params);
       setResult({ prices, loading: false, error: null });
       return prices;
     } catch (error: unknown) {

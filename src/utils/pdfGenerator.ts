@@ -1,11 +1,22 @@
 import { buildWalletBalancePdf, type ReportParams } from "../core/pdf";
+import type { PriceQuote } from "../core/price";
+
+interface BrowserReportParams extends Omit<ReportParams, "balance" | "prices"> {
+  balance: string | null;
+  prices: PriceQuote | null;
+}
 
 // Browser entry point: builds the report (src/core/pdf.ts, shared with the
-// headless CLI) and triggers the download.
-export const generateWalletBalancePDF = async (params: ReportParams): Promise<void> => {
-  const doc = await buildWalletBalancePdf(params);
+// headless CLI) and triggers the download. A report always carries balance
+// and price; the button is disabled without them, and this guard keeps any
+// other caller from producing an incomplete document.
+export const generateWalletBalancePDF = async ({ balance, prices, ...rest }: BrowserReportParams): Promise<void> => {
+  if (balance === null || prices === null) {
+    throw new Error("Fetch the balance and price before generating the PDF.");
+  }
+  const doc = await buildWalletBalancePdf({ ...rest, balance, prices });
   // Filename keeps ISO YYYY-MM-DD because that's the right call for sortable
   // filenames; the on-page Date row uses Swiss formatting to match the form
   // input.
-  doc.save(`wallet-balance-${params.formData.date}.pdf`);
+  doc.save(`wallet-balance-${rest.formData.date}.pdf`);
 };

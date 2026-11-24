@@ -1,48 +1,71 @@
-import { EvmBlockchain, NonEvmBlockchain, isBtcBlockchain, type Blockchain } from "../types";
+import { ethers } from "ethers";
+import {
+  EvmBlockchain,
+  NonEvmBlockchain,
+  isBtcBlockchain,
+  type Blockchain,
+  type Snapshot,
+  type SupportedAsset,
+} from "../types";
 import { getEstvBtcChf } from "../utils/estvTaxValues";
 import { cacheKey } from "../utils/cacheKey";
 import { blockchainLabel } from "../utils/blockchainLabel";
+import { evmRpcUrl } from "./balance";
 import type { Runtime } from "./runtime";
 
-// Fiat price lookup for an asset on a date. Framework-free: used by the
-// useCurrencyPrice hook and by the headless CLI.
+// Historical fiat price of an asset for the snapshot instant of a date.
+// Framework-free: used by the useCurrencyPrice hook and by the headless CLI.
+//
+// Every price is historical. There is deliberately no fallback to a current
+// price: a report must never show today's price under a past date, so a
+// missing price is an error.
+//
+// Point in time: CoinGecko's /coins/{id}/history value for day X is the price
+// at 00:00:00 UTC of X. "start" (00:00:00 UTC of D) uses day D; "end"
+// (23:59:59 UTC of D) uses day D+1, one second after the balance snapshot.
+// An official ESTV year-end CHF rate, where one exists, takes precedence.
 
-export interface PriceData {
+export type PriceCurrency = "usd" | "eur" | "chf";
+
+export interface PriceQuote {
   usd: number;
   eur: number;
   chf: number;
+  // Human-readable origin of each price, printed in the report, e.g.
+  // "CoinGecko, 01.01.2026 00:00 UTC" or "ESTV year-end rate 31.12.2025".
+  source: Record<PriceCurrency, string>;
 }
 
 export interface FetchPriceParams {
-  contractAddress?: string;
-  // Asset list type "Coin": priced by its CoinGecko coin id, not by
-  // contractAddress (which for native EVM coins is the wrapped token).
-  isNativeCoin: boolean;
+  asset: SupportedAsset;
   blockchain: Blockchain;
   // Calendar day YYYY-MM-DD.
   date: string;
-  // true: every price must be the historical one for `date`; any path that
-  // would return a current price throws instead. The browser passes false
-  // and keeps its existing fallbacks.
-  historicalOnly: boolean;
+  snapshot: Snapshot;
+  // Block number / height the balance was read at.
+  blockNumber: number;
 }
 
-// Map blockchain names to CoinGecko platform IDs (EVM only — BTC handled separately)
-const platformMap: Record<string, string> = {
-  Ethereum: "ethereum",
-  BinanceSmartChain: "binance-smart-chain",
-  Polygon: "polygon-pos",
-  Arbitrum: "arbitrum-one",
-  Optimism: "optimistic-ethereum",
-  Base: "base",
-  Gnosis: "xdai",
+type FiatPrices = Record<PriceCurrency, number>;
+
+const COINGECKO_API = "https://api.coingecko.com/api/v3";
+
+// CoinGecko publishes the 00:00 UTC value of a day roughly 35 minutes later.
+const COINGECKO_PUBLISH_DELAY_MS = 60 * 60 * 1000;
+
+// Map blockchain names to CoinGecko platform IDs for token contracts.
+const platformMap: Partial<Record<Blockchain, string>> = {
+  [EvmBlockchain.ETH]: "ethereum",
+  [EvmBlockchain.BSC]: "binance-smart-chain",
+  [EvmBlockchain.POLYGON]: "polygon-pos",
+  [EvmBlockchain.ARB]: "arbitrum-one",
+  [EvmBlockchain.OPT]: "optimistic-ethereum",
+  [EvmBlockchain.BASE]: "base",
+  [EvmBlockchain.GNOSIS]: "xdai",
 };
 
-// Map blockchain names to CoinGecko coin IDs for native-coin price lookups.
-// The EVM entries matter because CoinGecko has no historical endpoint per
-// contract address (/coins/{platform}/contract/{address}/history answers
-// 404), so pricing a native coin via its wrapped token's contract never
-// yielded a price for the requested date.
+// CoinGecko coin IDs of the native coins (asset type "Coin"). Their chainId
+// in the asset list is the wrapped token's contract, which is not used here.
 const nativeCoinMap: Record<Blockchain, string> = {
   [NonEvmBlockchain.BTC]: "bitcoin",
   [EvmBlockchain.ETH]: "ethereum",
@@ -55,178 +78,179 @@ const nativeCoinMap: Record<Blockchain, string> = {
   [EvmBlockchain.HAQQ]: "islamic-coin",
 };
 
-// Pull a fiat-priced field from a CoinGecko response shape and throw if the
-// field is missing or non-numeric. We refuse to ship 0 as a placeholder —
-// see the pricing-correctness rule: a stale or swapped value is worse than
-// a clear error, so we surface the missing field to the user instead.
-type PriceLookup = Record<string, number | null | undefined>;
+// Frankencoin pool share: priced by its own contract, in ZCHF (1 ZCHF = 1 CHF
+// is the Frankencoin peg the app has always assumed).
+const FPS_CONTRACT = "0x1ba26788dfde592fec8bcb0eaff472a42be341b2";
 
-function requirePrice(source: PriceLookup, key: "usd" | "eur" | "chf", subject: string): number {
+function addDays(date: string, days: number): string {
+  const d = new Date(date + "T00:00:00Z");
+  if (isNaN(d.getTime())) throw new Error(`Invalid date: ${date}`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// YYYY-MM-DD -> DD-MM-YYYY (CoinGecko query format).
+const coinGeckoDate = (day: string) => day.split("-").reverse().join("-");
+// YYYY-MM-DD -> DD.MM.YYYY (report format).
+const swissDate = (day: string) => day.split("-").reverse().join(".");
+
+function requirePrice(source: Record<string, unknown>, key: PriceCurrency, subject: string): number {
   const value = source[key];
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`[CoinGecko] Response for ${subject} missing ${key.toUpperCase()} price`);
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`CoinGecko has no ${key.toUpperCase()} price for ${subject}`);
   }
   return value;
 }
 
-function parseCachedPrice(cached: string): PriceData {
-  return JSON.parse(cached) as PriceData;
+async function coinGeckoErrorText(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    const status = (body as { error?: { status?: { error_message?: unknown } } | string }).error;
+    if (typeof status === "string") return `: ${status}`;
+    const message = status?.status?.error_message;
+    return typeof message === "string" ? `: ${message.trim()}` : "";
+  } catch {
+    return "";
+  }
 }
 
-// Convert date to "DD-MM-YYYY" format. The input is a plain calendar day
-// (YYYY-MM-DD), so we read it as a UTC instant and use the UTC accessors —
-// otherwise west-of-UTC locales would read "2024-12-31T00:00:00Z" as
-// 2024-12-30 local and ask CoinGecko for the wrong day.
-function formatDate(date: string): string {
-  const dateObj = new Date(date + "T00:00:00Z");
-  const day = dateObj.getUTCDate().toString().padStart(2, "0");
-  const month = (dateObj.getUTCMonth() + 1).toString().padStart(2, "0");
-  const year = dateObj.getUTCFullYear();
-  return `${day}-${month}-${year}`;
+// Resolves a token contract to its CoinGecko coin id (cached per contract).
+async function resolveCoinId(rt: Runtime, asset: SupportedAsset, blockchain: Blockchain): Promise<string> {
+  const platform = platformMap[blockchain];
+  if (!platform) {
+    throw new Error(`No CoinGecko price source for tokens on ${blockchainLabel(blockchain)} (${asset.name})`);
+  }
+  const contract = asset.chainId;
+  if (!contract || !ethers.isAddress(contract)) {
+    throw new Error(`Token ${asset.name} on ${blockchainLabel(blockchain)} has no contract address to price it`);
+  }
+  const address = contract.toLowerCase();
+
+  const key = cacheKey(["cg-id", platform, address]);
+  const cached = rt.cache.get(key);
+  if (cached) return cached;
+
+  const response = await rt.fetchCoinGecko(`${COINGECKO_API}/coins/${platform}/contract/${address}`);
+  if (response.status === 404) {
+    throw new Error(`CoinGecko does not list ${asset.name} (${address}) on ${blockchainLabel(blockchain)} — no price available`);
+  }
+  if (!response.ok) {
+    throw new Error(
+      `CoinGecko lookup for ${asset.name} on ${blockchainLabel(blockchain)} failed (HTTP ${response.status})${await coinGeckoErrorText(response)}`,
+    );
+  }
+  const data: unknown = await response.json();
+  const id = (data as { id?: unknown }).id;
+  if (typeof id !== "string" || !id) {
+    throw new Error(`CoinGecko returned no coin id for ${asset.name} on ${blockchainLabel(blockchain)}`);
+  }
+  rt.cache.set(key, id);
+  return id;
+}
+
+// CoinGecko's price of a coin at 00:00 UTC of `day` (cached per coin id and
+// day, so the same coin reached from several chains is fetched once).
+async function coinHistory(rt: Runtime, coinId: string, day: string, subject: string): Promise<FiatPrices> {
+  const key = cacheKey(["price-coin", coinId, day]);
+  const cached = rt.cache.get(key);
+  if (cached) return JSON.parse(cached) as FiatPrices;
+
+  const response = await rt.fetchCoinGecko(`${COINGECKO_API}/coins/${coinId}/history?date=${coinGeckoDate(day)}`);
+  if (!response.ok) {
+    throw new Error(
+      `CoinGecko price of ${subject} for ${swissDate(day)} unavailable (HTTP ${response.status})${await coinGeckoErrorText(response)}`,
+    );
+  }
+  const data: unknown = await response.json();
+  const current = (data as { market_data?: { current_price?: Record<string, unknown> } }).market_data?.current_price;
+  if (!current) throw new Error(`CoinGecko has no price of ${subject} for ${swissDate(day)}`);
+
+  const what = `${subject} on ${swissDate(day)}`;
+  const prices: FiatPrices = {
+    usd: requirePrice(current, "usd", what),
+    eur: requirePrice(current, "eur", what),
+    chf: requirePrice(current, "chf", what),
+  };
+  rt.cache.set(key, JSON.stringify(prices));
+  return prices;
+}
+
+// FPS price() in ZCHF (18 decimals) at the balance block.
+async function fpsPriceAtBlock(rt: Runtime, blockNumber: number): Promise<number> {
+  const iface = new ethers.Interface(["function price() view returns (uint256)"]);
+  const response = await fetch(evmRpcUrl(rt, EvmBlockchain.ETH), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_call",
+      params: [{ to: FPS_CONTRACT, data: iface.encodeFunctionData("price") }, `0x${blockNumber.toString(16)}`],
+    }),
+  });
+  if (!response.ok) throw new Error(`Alchemy ${response.status} reading the FPS price`);
+  const data = await response.json();
+  if (data.error) throw new Error(`RPC error reading the FPS price: ${data.error.message}`);
+  if (typeof data.result !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(data.result)) {
+    throw new Error("Unexpected FPS price() response");
+  }
+  const price = parseFloat(ethers.formatUnits(BigInt(data.result), 18));
+  if (!(price > 0)) throw new Error("FPS price() returned zero");
+  return price;
 }
 
 export async function fetchCurrencyPrice(
   rt: Runtime,
-  { contractAddress, isNativeCoin, blockchain, date, historicalOnly }: FetchPriceParams,
-): Promise<PriceData> {
-  const formattedDate = formatDate(date);
+  { asset, blockchain, date, snapshot, blockNumber }: FetchPriceParams,
+): Promise<PriceQuote> {
+  const priceDay = snapshot === "start" ? date : addDays(date, 1);
+  const publishedAt = new Date(priceDay + "T00:00:00Z").getTime() + COINGECKO_PUBLISH_DELAY_MS;
+  if (Date.now() < publishedAt) {
+    throw new Error(
+      `The price for ${snapshot === "end" ? "the end of " : ""}${swissDate(date)} is not published yet: ` +
+        `it is CoinGecko's ${swissDate(priceDay)} 00:00 UTC value, available from about 01:00 UTC that day.`,
+    );
+  }
+  const coinGeckoSource = `CoinGecko, ${swissDate(priceDay)} 00:00 UTC`;
 
-  // Native-coin path (BTC, ETH, BNB, ...) — use /coins/{id}/history
-  if (isNativeCoin || !contractAddress || isBtcBlockchain(blockchain)) {
-    if (!isNativeCoin) {
-      throw new Error(`[CoinGecko] No contract address to price this token on ${blockchainLabel(blockchain)}`);
-    }
-    const coinId = nativeCoinMap[blockchain];
-
-    const key = cacheKey(["price-coin", coinId, formattedDate]);
-    const cached = rt.cache.get(key);
-    if (cached) {
-      const cachedData = parseCachedPrice(cached);
-      if (isBtcBlockchain(blockchain)) {
-        const estvChf = getEstvBtcChf(date);
-        if (estvChf !== undefined) cachedData.chf = estvChf;
-      }
-      return cachedData;
-    }
-
-    const url = `https://api.coingecko.com/api/v3/coins/${coinId}/history?date=${formattedDate}`;
-    const response = await rt.fetchCoinGecko(url);
-    if (!response.ok) throw new Error(`Failed to fetch ${coinId} price for ${formattedDate}`);
-
-    const data = await response.json();
-    if (!data.market_data?.current_price) throw new Error("Historical price data not available");
-
-    const priceData: PriceData = {
-      usd: requirePrice(data.market_data.current_price, "usd", coinId),
-      eur: requirePrice(data.market_data.current_price, "eur", coinId),
-      chf: requirePrice(data.market_data.current_price, "chf", coinId),
+  // FPS: the contract's own price() at the balance block, converted to USD
+  // and EUR with CoinGecko's exchange rates of the price day (the ratio of
+  // Bitcoin's fiat prices at the same instant).
+  if (asset.type === "Token" && blockchain === EvmBlockchain.ETH && asset.chainId?.toLowerCase() === FPS_CONTRACT) {
+    const chf = await fpsPriceAtBlock(rt, blockNumber);
+    const fx = await coinHistory(rt, "bitcoin", priceDay, "Bitcoin (exchange rate)");
+    const viaFx = `FPS price() at Ethereum block ${blockNumber}, converted with CoinGecko rates ${swissDate(priceDay)} 00:00 UTC`;
+    return {
+      chf,
+      usd: (chf * fx.usd) / fx.chf,
+      eur: (chf * fx.eur) / fx.chf,
+      source: { chf: `FPS price() at Ethereum block ${blockNumber}`, usd: viaFx, eur: viaFx },
     };
-
-    // For BTC, override the CHF value with the official ESTV tax valuation
-    // when one is available for the requested record date. The Swiss wealth
-    // tax declaration uses ESTV's ICTax rate, not a market-aggregator price.
-    if (isBtcBlockchain(blockchain)) {
-      const estvChf = getEstvBtcChf(date);
-      if (estvChf !== undefined) priceData.chf = estvChf;
-    }
-
-    rt.cache.set(key, JSON.stringify(priceData));
-    return priceData;
   }
 
-  // Special handling for FPS token (price() on smart contract, denominated in CHF)
-  const isFPS = contractAddress.toLowerCase() === "0x1ba26788dfde592fec8bcb0eaff472a42be341b2" && blockchain === "Ethereum";
-
-  if (isFPS) {
-    // price() is read at the latest block and the forex rates are today's,
-    // so this is the current FPS price, not the one on the requested date.
-    if (historicalOnly) {
-      throw new Error(
-        "FPS has no historical price source: only the current price is available, which would be wrong for a past date.",
-      );
-    }
-    const key = cacheKey(["price-fps", formattedDate]);
-    const cached = rt.cache.get(key);
-    if (cached) return parseCachedPrice(cached);
-
-    const { ethers } = await import("ethers");
-    const provider = new ethers.JsonRpcProvider(`https://eth-mainnet.g.alchemy.com/v2/${rt.getAlchemyApiKey()}`);
-    const abi = ["function price() public view returns (uint256)"];
-    const fpsContract = new ethers.Contract(contractAddress, abi, provider);
-    const priceRaw = await fpsContract.price();
-    const fpsPriceInChf = parseFloat(ethers.formatUnits(priceRaw, 18));
-
-    const forexResponse = await rt.fetchCoinGecko(`https://api.coingecko.com/api/v3/simple/price?ids=usd,eur&vs_currencies=chf`);
-    if (!forexResponse.ok) {
-      throw new Error("[CoinGecko] Failed to fetch USD/EUR→CHF forex rates for FPS conversion");
-    }
-    const forexData = await forexResponse.json();
-    if (forexData.usd?.chf == null) {
-      throw new Error("[CoinGecko] FPS forex response missing usd→chf rate");
-    }
-    if (forexData.eur?.chf == null) {
-      throw new Error("[CoinGecko] FPS forex response missing eur→chf rate");
-    }
-    const usdRate = 1 / forexData.usd.chf;
-    const eurRate = 1 / forexData.eur.chf;
-
-    const priceData: PriceData = {
-      chf: fpsPriceInChf,
-      usd: fpsPriceInChf * usdRate,
-      eur: fpsPriceInChf * eurRate,
-    };
-
-    rt.cache.set(key, JSON.stringify(priceData));
-    return priceData;
-  }
-
-  // CoinGecko ERC-20 / EVM-token path
-  const platform = platformMap[blockchain];
-  if (!platform) throw new Error(`[CoinGecko] Unsupported blockchain: ${blockchainLabel(blockchain)}`);
-
-  const key = cacheKey(["price", contractAddress, formattedDate]);
-  const cached = rt.cache.get(key);
-  if (cached) return parseCachedPrice(cached);
-
-  let priceData: PriceData;
-  const url = `https://api.coingecko.com/api/v3/coins/${platform}/contract/${contractAddress.toLowerCase()}/history?date=${formattedDate}`;
-  const response = await rt.fetchCoinGecko(url);
-
-  if (!response.ok) {
-    // The browser keeps its historical behaviour of falling back to the
-    // *current* price. Headless callers ask for historicalOnly, where a failed
-    // history call (rate limit, unknown token) must be an error instead.
-    if (historicalOnly) {
-      throw new Error(
-        `[CoinGecko] Historical price for ${contractAddress} on ${formattedDate} unavailable (HTTP ${response.status})`,
-      );
-    }
-    const currentUrl = `https://api.coingecko.com/api/v3/simple/token_price/${platform}?contract_addresses=${contractAddress.toLowerCase()}&vs_currencies=usd,eur,chf`;
-    const currentResponse = await rt.fetchCoinGecko(currentUrl);
-    if (!currentResponse.ok) throw new Error("Failed to fetch price data");
-
-    const currentData = await currentResponse.json();
-    const tokenData = currentData[contractAddress.toLowerCase()];
-    if (!tokenData) throw new Error("Token price not found");
-
-    priceData = {
-      usd: requirePrice(tokenData, "usd", contractAddress),
-      eur: requirePrice(tokenData, "eur", contractAddress),
-      chf: requirePrice(tokenData, "chf", contractAddress),
-    };
+  let coinId: string;
+  if (asset.type === "Coin") {
+    coinId = nativeCoinMap[blockchain];
+  } else if (asset.type === "Token") {
+    coinId = await resolveCoinId(rt, asset, blockchain);
   } else {
-    const data = await response.json();
-    if (!data.market_data?.current_price) {
-      throw new Error("Historical price data not available");
-    }
-
-    priceData = {
-      usd: requirePrice(data.market_data.current_price, "usd", contractAddress),
-      eur: requirePrice(data.market_data.current_price, "eur", contractAddress),
-      chf: requirePrice(data.market_data.current_price, "chf", contractAddress),
-    };
+    throw new Error(`Asset ${asset.name} on ${blockchainLabel(blockchain)} has an unknown type — please report this on GitHub.`);
   }
 
-  rt.cache.set(key, JSON.stringify(priceData));
-  return priceData;
+  const prices = await coinHistory(rt, coinId, priceDay, asset.name);
+  const quote: PriceQuote = {
+    ...prices,
+    source: { usd: coinGeckoSource, eur: coinGeckoSource, chf: coinGeckoSource },
+  };
+
+  // For BTC the Swiss wealth tax uses ESTV's official ICTax year-end rate,
+  // not a market-aggregator price; it takes precedence where published.
+  if (isBtcBlockchain(blockchain)) {
+    const estvChf = getEstvBtcChf(date);
+    if (estvChf !== undefined) {
+      quote.chf = estvChf;
+      quote.source.chf = `ESTV year-end rate ${swissDate(date)}`;
+    }
+  }
+  return quote;
 }

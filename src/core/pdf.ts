@@ -4,7 +4,7 @@ import { formatSwissNumber } from "../utils/formatNumber";
 import { blockchainLabel } from "../utils/blockchainLabel";
 import { snapshotDescription } from "../utils/snapshot";
 import { brandSvgs, drawSvg } from "./logo";
-import type { PriceData } from "./price";
+import type { PriceCurrency, PriceQuote } from "./price";
 
 // Builds the wallet balance report. Framework- and DOM-free: the browser
 // saves the returned document via jsPDF's download, the headless CLI writes
@@ -28,10 +28,16 @@ export interface ReportParams {
     asset: { name: string };
     address: string;
   };
-  balance: string | null;
-  // null: balance-only report without a fiat row.
-  prices?: PriceData | null;
+  balance: string;
+  prices: PriceQuote;
   selectedCurrency: Currency;
+}
+
+// Enough digits to read small token prices (0.0006459) without drowning
+// large ones (69'571.9885): 4 decimals, or 4 significant digits below 1.
+function formatPrice(price: number): string {
+  const decimals = price >= 1 ? 4 : Math.max(4, 3 - Math.floor(Math.log10(price)));
+  return formatSwissNumber(price, decimals);
 }
 
 export async function buildWalletBalancePdf({
@@ -133,31 +139,27 @@ export async function buildWalletBalancePdf({
   doc.text(addressHash, valueX, y);
   y += rowGap * 2; // extra spacer before the balance block
 
-  // Add balance if available
-  if (balance) {
-    doc.setFont("helvetica", "bold");
-    doc.text("Balance:", labelX, y);
-    doc.text(`${balance} ${formData.asset.name}`, valueX, y);
-    doc.setFont("helvetica", "normal");
-    y += rowGap;
+  doc.setFont("helvetica", "bold");
+  doc.text("Balance:", labelX, y);
+  doc.text(`${balance} ${formData.asset.name}`, valueX, y);
+  doc.setFont("helvetica", "normal");
+  y += rowGap;
 
-    // Add currency value if prices are available
-    if (prices) {
-      const currency = selectedCurrency.toLowerCase() as keyof PriceData;
-      const rate = prices[currency];
-      const currencyValue = formatSwissNumber(parseFloat(balance) * rate);
+  // State exactly which price was used and where it comes from, then the
+  // value. Long source notes wrap within the value column.
+  const currency = selectedCurrency.toLowerCase() as PriceCurrency;
+  const rate = prices[currency];
+  const priceLines: string[] = doc.splitTextToSize(
+    `${selectedCurrency} ${formatPrice(rate)} per ${formData.asset.name} (${prices.source[currency]})`,
+    pageWidth - 20 - valueX,
+  );
+  doc.text("Price:", labelX, y);
+  doc.text(priceLines, valueX, y);
+  y += rowGap + (priceLines.length - 1) * 5;
 
-      doc.text(`In ${selectedCurrency}:`, labelX, y);
-      doc.text(currencyValue, valueX, y);
-      y += rowGap;
-    }
-  } else {
-    doc.setFont("helvetica", "bold");
-    doc.text("Balance:", labelX, y);
-    doc.text("Not yet fetched", valueX, y);
-    doc.setFont("helvetica", "normal");
-    y += rowGap;
-  }
+  doc.text(`In ${selectedCurrency}:`, labelX, y);
+  doc.text(formatSwissNumber(parseFloat(balance) * rate), valueX, y);
+  y += rowGap;
 
   // Add horizontal line below data section
   doc.line(20, y, pageWidth - 20, y);
