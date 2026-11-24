@@ -10,7 +10,9 @@ The balance is taken at a chosen instant of the date (UTC): **End of day**
 (23:59:59 UTC, default — the year-end record date) or **Start of day**
 (00:00:00 UTC). The report uses the last block at or before that instant and
 states the snapshot below the date. End of day is only available once that
-day is over in UTC.
+day is over in UTC. A snapshot is only reported once it is final: on EVM
+chains a block after the instant must exist, on Bitcoin 2 hours must have
+passed (block timestamps may lag by up to 2 hours).
 
 Every report carries a historical price and names it in the PDF. CoinGecko's
 history value for a day is the price at 00:00:00 UTC of that day, so Start

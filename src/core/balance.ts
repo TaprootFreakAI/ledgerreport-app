@@ -255,6 +255,18 @@ async function findEvmBlockByTimestamp(
     throw new Error(`Date is before ${blockchainLabel(blockchain)} existed`);
   }
 
+  // The result is only final once the chain has a block *after* the target
+  // instant: until then a block still to come may carry a timestamp at or
+  // before it and would supersede bestBlock. Check the next block explicitly
+  // and refuse (without caching) when it does not exist yet.
+  const nextTimestamp =
+    bestBlock < currentBlock ? await getEvmBlockTimestamp(rt, blockchain, bestBlock + 1) : undefined;
+  if (nextTimestamp === undefined || nextTimestamp <= targetTimestamp) {
+    throw new Error(
+      `${blockchainLabel(blockchain)} has not produced a block after this instant yet, so the balance is not final. Try again in a few minutes.`,
+    );
+  }
+
   rt.cache.set(key, bestBlock.toString());
   return bestBlock;
 }
@@ -501,9 +513,26 @@ async function fetchBitcoinBalance(
 // the raw status code leaked into the UI before this client-side check.
 const BTC_GENESIS_TIMESTAMP = 1230940800;
 
+// Bitcoin block timestamps may lag the real time: a block mined after the
+// target instant can still carry an earlier timestamp (consensus only needs
+// it above the median of the last 11 blocks; in practice the deviation stays
+// within the 2-hour rule). The block at or before an instant is therefore
+// only final 2 hours after it.
+const BTC_TIMESTAMP_SAFETY_MS = 2 * 60 * 60 * 1000;
+
 async function findBtcBlockByTimestamp(rt: Runtime, targetTimestamp: number): Promise<number> {
   if (targetTimestamp < BTC_GENESIS_TIMESTAMP) {
     throw new Error("Date is before Bitcoin existed");
+  }
+  // Checked before the cache and the lookup, so a not-yet-final height is
+  // neither returned nor cached.
+  const finalAt = targetTimestamp * 1000 + BTC_TIMESTAMP_SAFETY_MS;
+  if (Date.now() < finalAt) {
+    const at = new Date(finalAt).toISOString().slice(0, 16).replace("T", " ");
+    throw new Error(
+      `The Bitcoin balance for this instant is not final yet: block timestamps may lag by up to 2 hours, ` +
+        `so a block mined later can still belong to it. Try again after ${at} UTC.`,
+    );
   }
 
   const key = cacheKey(["block", NonEvmBlockchain.BTC, targetTimestamp]);
