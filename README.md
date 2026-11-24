@@ -119,7 +119,8 @@ usage errors). Existing output is never overwritten silently: a run
 refuses to start when `--out`, or a row PDF or `summary.csv` in `--out-dir`,
 already exists. `--overwrite` replaces them; each row's PDF is then removed
 before the row runs, so a row that now fails leaves no PDF from an earlier
-run behind. CoinGecko requests are spaced by `--price-interval-ms`
+run behind, and the old `summary.csv` is removed before the first row; the
+new one is written only when the run completes. CoinGecko requests are spaced by `--price-interval-ms`
 (default 6000) and retried on HTTP 429; per run, a token's coin id is
 looked up once per chain and contract, and a price once per coin id and
 day, even when several chains share the coin; set

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -351,6 +351,9 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string, overwrite:
   const summaryPath = join(outDir, "summary.csv");
   if (!overwrite) refuseExisting([...fileNames.map((f) => join(outDir, f)), summaryPath]);
   await mkdir(outDir, { recursive: true });
+  // An aborted run must not leave the earlier summary next to PDFs it has
+  // already removed or replaced: drop it before the first row.
+  if (overwrite) await rm(summaryPath, { force: true });
 
   const loadAssets = assetMapLoader();
   const summary: string[][] = [SUMMARY_HEADER];
@@ -408,7 +411,11 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string, overwrite:
     }
   }
 
-  await writeFile(summaryPath, formatCsv(summary));
+  // Written to a temp file in the same directory and renamed, so the
+  // summary appears complete or not at all.
+  const tempSummaryPath = join(outDir, `.summary.csv.${process.pid}.tmp`);
+  await writeFile(tempSummaryPath, formatCsv(summary));
+  await rename(tempSummaryPath, summaryPath);
   process.stderr.write(
     `${requests.length - failed} of ${requests.length} reports written, ${failed} failed. Summary: ${summaryPath}\n`,
   );
