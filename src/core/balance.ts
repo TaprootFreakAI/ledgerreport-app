@@ -452,12 +452,14 @@ async function esploraFetch(rt: Runtime, url: string): Promise<Response> {
 }
 
 // Address endpoints: a 400/404 means Esplora knows nothing about the address
-// (its format is validated before), anything else non-OK is an error.
-async function esploraAddressJson(rt: Runtime, url: string, walletAddress: string): Promise<unknown> {
+// (its format is validated before), anything else non-OK is an error. The
+// message never names the address: it ends up in the CLI's summary.csv and
+// stderr, where an address may only appear as its hash.
+async function esploraAddressJson(rt: Runtime, url: string): Promise<unknown> {
   const res = await esploraFetch(rt, url);
   if (!res.ok) {
     if (res.status === 400 || res.status === 404) {
-      throw new Error(`No on-chain activity found for ${walletAddress}. Double-check the address and try again.`);
+      throw new Error("No on-chain activity found for this address. Double-check the address and try again.");
     }
     throw new Error(`Esplora request failed: ${res.status} ${res.statusText}`);
   }
@@ -465,7 +467,7 @@ async function esploraAddressJson(rt: Runtime, url: string, walletAddress: strin
 }
 
 async function fetchChainStats(rt: Runtime, walletAddress: string): Promise<EsploraChainStats> {
-  const data = (await esploraAddressJson(rt, `${rt.esploraBase}/address/${walletAddress}`, walletAddress)) as {
+  const data = (await esploraAddressJson(rt, `${rt.esploraBase}/address/${walletAddress}`)) as {
     chain_stats?: Partial<EsploraChainStats>;
   };
   const stats = data.chain_stats;
@@ -501,7 +503,7 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
     const url = lastSeenTxid
       ? `${rt.esploraBase}/address/${walletAddress}/txs/chain/${lastSeenTxid}`
       : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
-    const page = parseEsploraPage(await esploraAddressJson(rt, url, walletAddress));
+    const page = parseEsploraPage(await esploraAddressJson(rt, url));
     pages++;
     if (pages % ESPLORA_PROGRESS_EVERY_PAGES === 0) {
       rt.log(`Bitcoin history: ${pages} pages (${pages * ESPLORA_PAGE_SIZE} transactions) read`);
