@@ -97,6 +97,15 @@ Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
   `token_type` / `--token-type` (`Coin` or `Token`) narrows the match; an
   unknown or ambiguous token is an error.
 - `snapshot`: `start` or `end`; `currency`: `CHF`, `EUR` or `USD`.
+- `price` and `price_source` (optional, single mode `--price <decimal>
+  --price-source "<text>"`): a price supplied by the report creator for
+  assets CoinGecko cannot price. `price` is the price of one unit in the
+  row's currency (positive decimal), `price_source` a single line of up to
+  200 characters naming its origin; give both or neither. Such a row skips
+  every price lookup. The PDF prints the price with the given source and a
+  "Price source: Provided by the report creator — not fetched or verified
+  by LedgerReport." row; `summary.csv` records `supplied: <text>`.
+  **LedgerReport does not verify a supplied price.**
 
 When the historical price is unavailable the report fails. A failed row gets no PDF,
 is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for

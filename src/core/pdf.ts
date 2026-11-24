@@ -6,6 +6,24 @@ import { snapshotDescription } from "../utils/snapshot";
 import { brandSvgs, drawSvg } from "./logo";
 import type { PriceCurrency, PriceQuote } from "./price";
 
+// The one price the report is valued with.
+export interface ReportPrice {
+  currency: Currency;
+  // Price of one unit of the asset in `currency`.
+  value: number;
+  // Where the price comes from, printed in parentheses after it.
+  source: string;
+  // true: given by the report creator, not looked up by LedgerReport. The
+  // PDF then says so in its own row.
+  supplied: boolean;
+}
+
+// The looked-up price for the chosen currency.
+export function reportPriceFromQuote(quote: PriceQuote, currency: Currency): ReportPrice {
+  const key = currency.toLowerCase() as PriceCurrency;
+  return { currency, value: quote[key], source: quote.source[key], supplied: false };
+}
+
 // Builds the wallet balance report. Framework- and DOM-free: the browser
 // saves the returned document via jsPDF's download, the headless CLI writes
 // doc.output("arraybuffer") to disk.
@@ -29,8 +47,7 @@ export interface ReportParams {
     address: string;
   };
   balance: string;
-  prices: PriceQuote;
-  selectedCurrency: Currency;
+  price: ReportPrice;
 }
 
 // Enough digits to read small token prices (0.0006459) without drowning
@@ -43,8 +60,7 @@ function formatPrice(price: number): string {
 export async function buildWalletBalancePdf({
   formData,
   balance,
-  prices,
-  selectedCurrency,
+  price,
 }: ReportParams): Promise<jsPDF> {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -146,19 +162,24 @@ export async function buildWalletBalancePdf({
   y += rowGap;
 
   // State exactly which price was used and where it comes from, then the
-  // value. Long source notes wrap within the value column.
-  const currency = selectedCurrency.toLowerCase() as PriceCurrency;
-  const rate = prices[currency];
-  const priceLines: string[] = doc.splitTextToSize(
-    `${selectedCurrency} ${formatPrice(rate)} per ${formData.asset.name} (${prices.source[currency]})`,
-    pageWidth - 20 - valueX,
+  // value. Long notes wrap within the value column.
+  const valueWidth = pageWidth - 20 - valueX;
+  const wrappedRow = (label: string, text: string) => {
+    const lines: string[] = doc.splitTextToSize(text, valueWidth);
+    doc.text(label, labelX, y);
+    doc.text(lines, valueX, y);
+    y += rowGap + (lines.length - 1) * 5;
+  };
+  wrappedRow(
+    "Price:",
+    `${price.currency} ${formatPrice(price.value)} per ${formData.asset.name} (${price.source})`,
   );
-  doc.text("Price:", labelX, y);
-  doc.text(priceLines, valueX, y);
-  y += rowGap + (priceLines.length - 1) * 5;
+  if (price.supplied) {
+    wrappedRow("Price source:", "Provided by the report creator — not fetched or verified by LedgerReport.");
+  }
 
-  doc.text(`In ${selectedCurrency}:`, labelX, y);
-  doc.text(formatSwissNumber(parseFloat(balance) * rate), valueX, y);
+  doc.text(`In ${price.currency}:`, labelX, y);
+  doc.text(formatSwissNumber(parseFloat(balance) * price.value), valueX, y);
   y += rowGap;
 
   // Add horizontal line below data section

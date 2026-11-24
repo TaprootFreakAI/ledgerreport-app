@@ -7,8 +7,8 @@ import { isSupportedBlockchain, type Blockchain, type Currency, type Snapshot } 
 import { isParsableDay, isSnapshot } from "../utils/snapshot";
 import { fetchAssetMap, resolveAsset, type AssetMap, type AssetType } from "../core/assets";
 import { fetchWalletBalance } from "../core/balance";
-import { fetchCurrencyPrice, type PriceCurrency } from "../core/price";
-import { addressHashForReport, buildWalletBalancePdf } from "../core/pdf";
+import { fetchCurrencyPrice } from "../core/price";
+import { addressHashForReport, buildWalletBalancePdf, reportPriceFromQuote, type ReportPrice } from "../core/pdf";
 import type { Runtime } from "../core/runtime";
 import { createNodeRuntime } from "./nodeRuntime";
 import { formatCsv, parseCsv } from "./csv";
@@ -20,11 +20,18 @@ const USAGE = `Usage:
   npm run report -- --network <chain> --token <name> [--token-type Coin|Token]
                     --address <address> --date YYYY-MM-DD --snapshot start|end
                     --currency CHF|EUR|USD --out <file.pdf>
+                    [--price <decimal> --price-source "<text>"]
 
   npm run report -- --batch <items.csv> --out-dir <dir>
 
 Batch CSV columns: network, token, address, date, snapshot, currency
-(optional: token_type). Writes one PDF per row plus summary.csv into --out-dir.
+(optional: token_type, price, price_source). Writes one PDF per row plus
+summary.csv into --out-dir.
+
+--price/--price-source (CSV: price, price_source) supply the price of one
+unit in the chosen currency yourself, for assets CoinGecko cannot price.
+Both or neither; LedgerReport does not verify a supplied price, and the PDF
+says it was provided by the report creator.
 
 Options:
   --price-interval-ms <ms>  Minimum gap between CoinGecko requests (default 6000)
@@ -34,7 +41,8 @@ Exit code: 0 all reports written, 1 at least one report failed, 2 usage error.`;
 
 const DEFAULT_PRICE_INTERVAL_MS = 6000;
 const CSV_REQUIRED_COLUMNS = ["network", "token", "address", "date", "snapshot", "currency"] as const;
-const CSV_OPTIONAL_COLUMNS = ["token_type"] as const;
+const CSV_OPTIONAL_COLUMNS = ["token_type", "price", "price_source"] as const;
+const PRICE_SOURCE_MAX_LENGTH = 200;
 const SUMMARY_HEADER = [
   "row",
   "network",
@@ -65,6 +73,14 @@ interface RawRequest {
   date: string;
   snapshot: string;
   currency: string;
+  // Creator-supplied price; both empty when not given.
+  price: string;
+  priceSource: string;
+}
+
+interface SuppliedPrice {
+  value: number;
+  source: string;
 }
 
 interface ValidRequest {
@@ -75,6 +91,7 @@ interface ValidRequest {
   date: string;
   snapshot: Snapshot;
   currency: Currency;
+  suppliedPrice: SuppliedPrice | undefined;
 }
 
 interface ReportResult {
@@ -120,7 +137,31 @@ function validateRequest(raw: RawRequest): ValidRequest {
     date: raw.date,
     snapshot: raw.snapshot,
     currency: raw.currency as Currency,
+    suppliedPrice: validateSuppliedPrice(raw),
   };
+}
+
+const PRICE_PAIR_MESSAGE = "price and price_source (--price and --price-source) must be given together";
+
+function validateSuppliedPrice(raw: RawRequest): SuppliedPrice | undefined {
+  const hasPrice = raw.price !== "";
+  const hasSource = raw.priceSource !== "";
+  if (!hasPrice && !hasSource) return undefined;
+  if (!hasPrice) throw new Error(`price_source given without price — ${PRICE_PAIR_MESSAGE}`);
+  if (!hasSource) throw new Error(`price given without price_source — ${PRICE_PAIR_MESSAGE}`);
+
+  const value = Number(raw.price);
+  if (!/^\d+(\.\d+)?$/.test(raw.price) || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`Invalid price "${raw.price}" — expected a positive decimal such as 0.9311`);
+  }
+  if (raw.priceSource.length > PRICE_SOURCE_MAX_LENGTH) {
+    throw new Error(`price_source is longer than ${PRICE_SOURCE_MAX_LENGTH} characters`);
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(raw.priceSource)) {
+    throw new Error("price_source must be a single line of text");
+  }
+  return { value, source: raw.priceSource };
 }
 
 async function produceReport(
@@ -138,16 +179,21 @@ async function produceReport(
     snapshot: request.snapshot,
   });
 
-  const prices = await fetchCurrencyPrice(rt, {
-    asset,
-    blockchain: request.network,
-    date: request.date,
-    snapshot: request.snapshot,
-    blockNumber,
-  });
-  const key = request.currency.toLowerCase() as PriceCurrency;
-  const price = prices[key];
-  const value = (parseFloat(balance) * price).toFixed(2);
+  // A creator-supplied price replaces every lookup (CoinGecko, ESTV, FPS
+  // contract) for this row; the PDF marks it as supplied.
+  const price: ReportPrice = request.suppliedPrice
+    ? { currency: request.currency, value: request.suppliedPrice.value, source: request.suppliedPrice.source, supplied: true }
+    : reportPriceFromQuote(
+        await fetchCurrencyPrice(rt, {
+          asset,
+          blockchain: request.network,
+          date: request.date,
+          snapshot: request.snapshot,
+          blockNumber,
+        }),
+        request.currency,
+      );
+  const value = (parseFloat(balance) * price.value).toFixed(2);
 
   // Only reached when balance and price are known — a failed lookup above
   // throws and no PDF is written.
@@ -160,12 +206,18 @@ async function produceReport(
       address: request.address,
     },
     balance,
-    prices,
-    selectedCurrency: request.currency,
+    price,
   });
   await writeFile(outFile, new Uint8Array(doc.output("arraybuffer")));
 
-  return { assetType: asset.type ?? "", blockNumber, balance, price, priceSource: prices.source[key], value };
+  return {
+    assetType: asset.type ?? "",
+    blockNumber,
+    balance,
+    price: price.value,
+    priceSource: price.supplied ? `supplied: ${price.source}` : price.source,
+    value,
+  };
 }
 
 function errorMessage(e: unknown): string {
@@ -237,6 +289,8 @@ function readBatchRows(text: string): RawRequest[] {
       date: get("date"),
       snapshot: get("snapshot"),
       currency: get("currency"),
+      price: get("price"),
+      priceSource: get("price_source"),
     };
   });
 }
@@ -327,6 +381,8 @@ async function main(argv: string[]): Promise<number> {
       batch: { type: "string" },
       "out-dir": { type: "string" },
       "price-interval-ms": { type: "string" },
+      price: { type: "string" },
+      "price-source": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -349,7 +405,7 @@ async function main(argv: string[]): Promise<number> {
   if (existsSync(".env")) process.loadEnvFile(".env");
   const rt = createNodeRuntime({ priceIntervalMs, log: (m) => process.stderr.write(m + "\n") });
 
-  const singleOptions = ["network", "token", "token-type", "address", "date", "snapshot", "currency", "out"] as const;
+  const singleOptions = ["network", "token", "token-type", "address", "date", "snapshot", "currency", "out", "price", "price-source"] as const;
 
   if (values.batch !== undefined) {
     const used = singleOptions.filter((o) => values[o] !== undefined);
@@ -359,6 +415,9 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (values["out-dir"] !== undefined) throw new UsageError("--out-dir is only valid with --batch");
+  if ((values.price === undefined) !== (values["price-source"] === undefined)) {
+    throw new UsageError("--price and --price-source must be given together");
+  }
   const currency = values.currency;
   const required: Record<string, string | undefined> = {
     network: values.network,
@@ -380,6 +439,8 @@ async function main(argv: string[]): Promise<number> {
       network: values.network!,
       token: values.token!,
       tokenType: values["token-type"] ?? "",
+      price: values.price?.trim() ?? "",
+      priceSource: values["price-source"]?.trim() ?? "",
       address: values.address!,
       date: values.date!,
       snapshot: values.snapshot!,
