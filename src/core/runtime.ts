@@ -18,6 +18,8 @@ export interface Runtime {
   // Every CoinGecko request goes through here, so a host can space calls
   // out or retry on rate limits.
   fetchCoinGecko: (url: string) => Promise<Response>;
+  // Progress and retry notes for long lookups (e.g. a long Bitcoin history).
+  log: (message: string) => void;
 }
 
 export const DEFAULT_ESPLORA_BASE = "https://mempool.space/api";

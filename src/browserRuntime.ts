@@ -14,4 +14,5 @@ export const browserRuntime: Runtime = {
     set: (key, value) => localStorage.setItem(key, value),
   },
   fetchCoinGecko: (url) => fetch(url),
+  log: (message) => console.info(message),
 };

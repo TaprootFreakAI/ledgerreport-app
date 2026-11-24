@@ -94,8 +94,11 @@ historical price is unavailable the report fails. A failed row gets no PDF,
 is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for
 usage errors). CoinGecko requests are spaced by `--price-interval-ms`
 (default 6000) and retried on HTTP 429; set `COINGECKO_DEMO_API_KEY` for a
-higher limit. Block numbers and prices are cached in memory for one run
-only. The PDF shows the address only as a hash, as in the web app.
+higher limit. Bitcoin balances read only the transactions after the
+snapshot block (current confirmed totals minus everything newer), with
+paced page requests and retries on HTTP 429/5xx; a history that cannot be
+read completely is an error, never a partial balance. Block numbers and
+prices are cached in memory for one run only. The PDF shows the address only as a hash, as in the web app.
 
 ## Icons
 

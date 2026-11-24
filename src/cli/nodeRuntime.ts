@@ -57,5 +57,6 @@ export function createNodeRuntime({ priceIntervalMs, log }: NodeRuntimeOptions):
     esploraBase: esploraBaseFrom(process.env.VITE_ESPLORA_URL),
     cache: new MemoryCache(),
     fetchCoinGecko,
+    log,
   };
 }

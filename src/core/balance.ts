@@ -246,6 +246,167 @@ interface EsploraTx {
   vout: EsploraVout[];
 }
 
+interface EsploraChainStats {
+  funded_txo_sum: number;
+  spent_txo_sum: number;
+  tx_count: number;
+}
+
+const ESPLORA_PAGE_SIZE = 25;
+// Gap between two history pages. An unpaced walk through hundreds of pages
+// runs into mempool.space's rate limit (HTTP 429); two requests per second
+// stays below it while a 500-page history still finishes in a few minutes.
+const ESPLORA_PAGE_DELAY_MS = 500;
+// Retries for HTTP 429, 502/503/504 and network failures. All Esplora calls
+// are idempotent GETs, so repeating one is safe. Without Retry-After the wait
+// doubles from 5 s up to 120 s: 5+10+20+40+80+120 s ≈ 4.5 min in total
+// before giving up.
+const ESPLORA_MAX_RETRIES = 6;
+const ESPLORA_BACKOFF_START_MS = 5_000;
+const ESPLORA_BACKOFF_CAP_MS = 120_000;
+// A Retry-After beyond this is not waited out (a browser tab would look
+// frozen); the request fails with the provider's requested wait instead.
+const ESPLORA_MAX_RETRY_AFTER_MS = 300_000;
+const ESPLORA_PROGRESS_EVERY_PAGES = 20;
+// How often the history is re-read when the address changes while paging.
+const BTC_SNAPSHOT_ATTEMPTS = 3;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const PROVIDER_UNREACHABLE = "Bitcoin data provider unreachable. Check VITE_ESPLORA_URL or retry.";
+
+function retryAfterMs(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(header);
+  return isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+// GET an Esplora URL, retrying rate limits (429), gateway errors (502/503/504)
+// and network failures with Retry-After or capped exponential backoff. Any
+// other status is returned to the caller; exhausting the retries throws.
+async function esploraFetch(rt: Runtime, url: string): Promise<Response> {
+  for (let retry = 0; ; retry++) {
+    let response: Response | undefined;
+    try {
+      response = await fetch(url);
+    } catch (e) {
+      // `fetch` rejects with TypeError for network-level failures: DNS, TLS,
+      // CORS, the provider being down, an offline browser.
+      if (!(e instanceof TypeError)) throw e;
+    }
+    const retryable = response === undefined || [429, 502, 503, 504].includes(response.status);
+    if (!retryable) return response!;
+
+    const reason = response === undefined ? "network error" : `HTTP ${response.status}`;
+    if (retry >= ESPLORA_MAX_RETRIES) {
+      if (response === undefined) throw new Error(PROVIDER_UNREACHABLE);
+      throw new Error(
+        response.status === 429
+          ? `Bitcoin data provider is rate limiting requests (HTTP 429) and still did after ${ESPLORA_MAX_RETRIES} retries. Wait a few minutes and try again.`
+          : `Bitcoin data provider failed with HTTP ${response.status} after ${ESPLORA_MAX_RETRIES} retries. Try again later.`,
+      );
+    }
+
+    const requested = response === undefined ? undefined : retryAfterMs(response.headers.get("retry-after"));
+    if (requested !== undefined && requested > ESPLORA_MAX_RETRY_AFTER_MS) {
+      throw new Error(
+        `Bitcoin data provider asks to wait ${Math.ceil(requested / 1000)} s (${reason}). Try again later.`,
+      );
+    }
+    const waitMs =
+      requested !== undefined
+        ? requested
+        : Math.min(ESPLORA_BACKOFF_START_MS * 2 ** retry, ESPLORA_BACKOFF_CAP_MS);
+    rt.log(`Bitcoin data provider: ${reason}, retry ${retry + 1}/${ESPLORA_MAX_RETRIES} in ${Math.round(waitMs / 1000)} s`);
+    await sleep(waitMs);
+  }
+}
+
+// Address endpoints: a 400/404 means Esplora knows nothing about the address
+// (its format is validated before), anything else non-OK is an error.
+async function esploraAddressJson(rt: Runtime, url: string, walletAddress: string): Promise<unknown> {
+  const res = await esploraFetch(rt, url);
+  if (!res.ok) {
+    if (res.status === 400 || res.status === 404) {
+      throw new Error(`No on-chain activity found for ${walletAddress}. Double-check the address and try again.`);
+    }
+    throw new Error(`Esplora request failed: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+async function fetchChainStats(rt: Runtime, walletAddress: string): Promise<EsploraChainStats> {
+  const data = (await esploraAddressJson(rt, `${rt.esploraBase}/address/${walletAddress}`, walletAddress)) as {
+    chain_stats?: Partial<EsploraChainStats>;
+  };
+  const stats = data.chain_stats;
+  if (
+    !stats ||
+    !Number.isSafeInteger(stats.funded_txo_sum) ||
+    !Number.isSafeInteger(stats.spent_txo_sum) ||
+    !Number.isSafeInteger(stats.tx_count)
+  ) {
+    throw new Error("Invalid Esplora address response");
+  }
+  return stats as EsploraChainStats;
+}
+
+const sameStats = (a: EsploraChainStats, b: EsploraChainStats) =>
+  a.funded_txo_sum === b.funded_txo_sum && a.spent_txo_sum === b.spent_txo_sum && a.tx_count === b.tx_count;
+
+// Net satoshi effect on the address of all confirmed TXs above targetHeight.
+// Esplora lists confirmed TXs newest-first, so paging stops at the first TX
+// at or below targetHeight instead of walking the whole history.
+async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeight: number): Promise<number> {
+  let net = 0;
+  let pages = 0;
+  let lastSeenTxid: string | undefined;
+  let previousHeight = Number.POSITIVE_INFINITY;
+  const finish = () => {
+    if (pages >= ESPLORA_PROGRESS_EVERY_PAGES) rt.log(`Bitcoin history: done after ${pages} pages`);
+    return net;
+  };
+
+  while (true) {
+    if (pages > 0) await sleep(ESPLORA_PAGE_DELAY_MS);
+    const url = lastSeenTxid
+      ? `${rt.esploraBase}/address/${walletAddress}/txs/chain/${lastSeenTxid}`
+      : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
+    const page = (await esploraAddressJson(rt, url, walletAddress)) as EsploraTx[];
+    if (!Array.isArray(page)) throw new Error("Invalid Esplora transaction list response");
+    pages++;
+    if (pages % ESPLORA_PROGRESS_EVERY_PAGES === 0) {
+      rt.log(`Bitcoin history: ${pages} pages (${pages * ESPLORA_PAGE_SIZE} transactions) read`);
+    }
+
+    for (const tx of page) {
+      const height = tx.status.block_height;
+      if (!tx.status.confirmed || height === undefined) {
+        throw new Error("Esplora returned an unconfirmed transaction in the confirmed history");
+      }
+      // The early stop below is only correct for newest-first order; refuse
+      // to compute anything if the provider ever returns another order.
+      if (height > previousHeight) {
+        throw new Error("Esplora transaction history is not ordered newest-first");
+      }
+      previousHeight = height;
+      if (height <= targetHeight) return finish();
+
+      for (const out of tx.vout) {
+        if (out.scriptpubkey_address === walletAddress) net += out.value;
+      }
+      for (const inp of tx.vin) {
+        if (inp.prevout?.scriptpubkey_address === walletAddress) net -= inp.prevout.value;
+      }
+    }
+
+    if (page.length < ESPLORA_PAGE_SIZE) return finish();
+    lastSeenTxid = page[page.length - 1].txid;
+  }
+}
+
 async function fetchBitcoinBalance(
   rt: Runtime,
   walletAddress: string,
@@ -257,69 +418,33 @@ async function fetchBitcoinBalance(
 
   const targetHeight = await findBtcBlockByTimestamp(rt, targetTimestamp);
 
-  let satsBalance = 0;
-  let lastSeenTxid: string | undefined;
-
-  // Esplora returns confirmed TXs newest-first, 25 per page. We page until we've seen
-  // every TX confirmed at or before targetHeight, then stop. TXs newer than targetHeight
-  // are skipped (not yet existed at the snapshot date).
-  while (true) {
-    const url = lastSeenTxid
-      ? `${rt.esploraBase}/address/${walletAddress}/txs/chain/${lastSeenTxid}`
-      : `${rt.esploraBase}/address/${walletAddress}/txs/chain`;
-
-    let res: Response;
-    try {
-      res = await fetch(url);
-    } catch (e) {
-      // `fetch` rejects with TypeError for network-level failures: DNS,
-      // TLS, CORS preflight, the provider being down, an offline browser.
-      // The default "TypeError: Failed to fetch" tells the user nothing
-      // actionable. Translate it once at the boundary and re-throw so the
-      // existing error path (setResult({error}) + re-throw to the form
-      // handler) still runs unchanged.
-      if (e instanceof TypeError) {
-        throw new Error(
-          `Bitcoin data provider unreachable. Check VITE_ESPLORA_URL or retry.`,
-        );
-      }
-      throw e;
-    }
-    if (!res.ok) {
-      if (res.status === 400 || res.status === 404) {
-        // Address format is already validated above (isValidBtcAddress), so a
-        // 400/404 here means Esplora has no record of any on-chain activity.
-        throw new Error(
-          `No on-chain activity found for ${walletAddress}. Double-check the address and try again.`,
-        );
-      }
-      throw new Error(`Esplora request failed: ${res.status} ${res.statusText}`);
-    }
-    const page: EsploraTx[] = await res.json();
-    if (page.length === 0) break;
-
-    for (const tx of page) {
-      if (!tx.status.confirmed || tx.status.block_height === undefined) continue;
-      if (tx.status.block_height > targetHeight) continue;
-
-      for (const out of tx.vout) {
-        if (out.scriptpubkey_address === walletAddress) satsBalance += out.value;
-      }
-      for (const inp of tx.vin) {
-        if (inp.prevout?.scriptpubkey_address === walletAddress) satsBalance -= inp.prevout.value;
-      }
+  // Balance at targetHeight = today's confirmed balance (chain_stats: sum of
+  // all confirmed outputs to the address minus all confirmed spends of them)
+  // minus the net effect of every confirmed TX above targetHeight. That only
+  // needs the TXs after the snapshot, not the whole history.
+  //
+  // Both terms must describe the same set of confirmed TXs. The totals are
+  // read before and after paging; if they are identical, no TX for the
+  // address was confirmed in between, so the pages saw exactly the TXs the
+  // totals include. If they differ, the whole read is repeated. Any failed
+  // request throws — a partially read history never yields a number.
+  for (let attempt = 1; attempt <= BTC_SNAPSHOT_ATTEMPTS; attempt++) {
+    const before = await fetchChainStats(rt, walletAddress);
+    const netAfter = await netSatsAfterHeight(rt, walletAddress, targetHeight);
+    const after = await fetchChainStats(rt, walletAddress);
+    if (!sameStats(before, after)) {
+      rt.log("Bitcoin address received new transactions while reading its history, reading again");
+      continue;
     }
 
-    if (page.length < 25) break;
-    lastSeenTxid = page[page.length - 1].txid;
+    const satsBalance = before.funded_txo_sum - before.spent_txo_sum - netAfter;
+    if (satsBalance < 0) {
+      throw new Error("Computed negative Bitcoin balance — chain data inconsistent");
+    }
+    const btc = satsBalance / 10 ** BTC_DECIMALS;
+    return { balance: formatTokenAmount(btc.toFixed(BTC_DECIMALS)), blockNumber: targetHeight };
   }
-
-  if (satsBalance < 0) {
-    throw new Error("Computed negative Bitcoin balance — chain data inconsistent");
-  }
-
-  const btc = satsBalance / 10 ** BTC_DECIMALS;
-  return { balance: formatTokenAmount(btc.toFixed(BTC_DECIMALS)), blockNumber: targetHeight };
+  throw new Error("Bitcoin address kept receiving new transactions while its history was read. Try again.");
 }
 
 // Bitcoin genesis block timestamp (2009-01-03 18:15:05 UTC). Any earlier
@@ -343,19 +468,7 @@ async function findBtcBlockByTimestamp(rt: Runtime, targetTimestamp: number): Pr
   // at or before targetTimestamp (`WHERE blockTimestamp <= ? ORDER BY
   // blockTimestamp DESC LIMIT 1`), so both the 00:00:00 and the 23:59:59
   // snapshot resolve to the last block at or before that instant.
-  let res: Response;
-  try {
-    res = await fetch(`${rt.esploraBase}/v1/mining/blocks/timestamp/${targetTimestamp}`);
-  } catch (e) {
-    // Same network-level translation as the address-paging fetch above:
-    // surface an actionable message instead of "Failed to fetch".
-    if (e instanceof TypeError) {
-      throw new Error(
-        `Bitcoin data provider unreachable. Check VITE_ESPLORA_URL or retry.`,
-      );
-    }
-    throw e;
-  }
+  const res = await esploraFetch(rt, `${rt.esploraBase}/v1/mining/blocks/timestamp/${targetTimestamp}`);
   if (!res.ok) throw new Error(`Failed to resolve Bitcoin block for timestamp: ${res.status}`);
   const data = await res.json();
   if (typeof data.height !== "number") throw new Error("Invalid Esplora timestamp response");
