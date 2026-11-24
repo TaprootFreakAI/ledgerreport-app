@@ -113,7 +113,11 @@ Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
 
 When the historical price is unavailable the report fails. A failed row gets no PDF,
 is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for
-usage errors). CoinGecko requests are spaced by `--price-interval-ms`
+usage errors). Existing output is never overwritten silently: a run
+refuses to start when `--out`, or a row PDF or `summary.csv` in `--out-dir`,
+already exists. `--overwrite` replaces them; each row's PDF is then removed
+before the row runs, so a row that now fails leaves no PDF from an earlier
+run behind. CoinGecko requests are spaced by `--price-interval-ms`
 (default 6000) and retried on HTTP 429; per run, a token's coin id is
 looked up once per chain and contract, and a price once per coin id and
 day, even when several chains share the coin; set

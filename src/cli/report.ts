@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -35,6 +35,9 @@ Both or neither; LedgerReport does not verify a supplied price, and the PDF
 says it was provided by the report creator.
 
 Options:
+  --overwrite               Replace existing output files (--out, or the row
+                            PDFs and summary.csv in --out-dir); without it a
+                            run refuses to start when any of them exists
   --price-interval-ms <ms>  Minimum gap between CoinGecko requests (default 6000)
   --help                    Show this help
 
@@ -249,7 +252,21 @@ function safeFilePart(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, "_");
 }
 
-async function runSingle(rt: Runtime, raw: RawRequest, outFile: string): Promise<number> {
+// Every PDF in the output must belong to an ok row of this run. Without
+// --overwrite a run refuses to start when it would write over an existing
+// file; with it, a row's target file is removed before the row is processed,
+// so a row that now fails can never leave the PDF of an earlier run behind.
+function refuseExisting(paths: string[]): void {
+  const existing = paths.filter((p) => existsSync(p));
+  if (existing.length) {
+    const shown = existing.slice(0, 3).join(", ") + (existing.length > 3 ? `, … (${existing.length} files)` : "");
+    throw new UsageError(`Output file(s) already exist: ${shown}. Use --overwrite to replace them.`);
+  }
+}
+
+async function runSingle(rt: Runtime, raw: RawRequest, outFile: string, overwrite: boolean): Promise<number> {
+  if (overwrite) await rm(outFile, { force: true });
+  else refuseExisting([outFile]);
   const loadAssets = assetMapLoader();
   try {
     const request = validateRequest(raw);
@@ -306,20 +323,29 @@ function readBatchRows(text: string): RawRequest[] {
   });
 }
 
-async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<number> {
+async function runBatch(rt: Runtime, csvPath: string, outDir: string, overwrite: boolean): Promise<number> {
   const requests = readBatchRows(await readFile(csvPath, "utf8"));
   if (requests.length === 0) throw new UsageError("Batch CSV has no data rows");
+
+  const width = String(requests.length).length;
+  const rowNos = requests.map((_, i) => String(i + 1).padStart(width, "0"));
+  const fileNames = requests.map(
+    (raw, i) =>
+      `${rowNos[i]}-${safeFilePart(raw.network)}-${safeFilePart(raw.token)}-${safeFilePart(raw.date)}-${safeFilePart(raw.snapshot)}.pdf`,
+  );
+  const summaryPath = join(outDir, "summary.csv");
+  if (!overwrite) refuseExisting([...fileNames.map((f) => join(outDir, f)), summaryPath]);
   await mkdir(outDir, { recursive: true });
 
   const loadAssets = assetMapLoader();
   const summary: string[][] = [SUMMARY_HEADER];
-  const width = String(requests.length).length;
   let failed = 0;
 
   for (const [i, raw] of requests.entries()) {
-    const rowNo = String(i + 1).padStart(width, "0");
+    const rowNo = rowNos[i];
     const label = `[${rowNo}/${requests.length}] ${raw.network} ${raw.token} ${raw.date} ${raw.snapshot}`;
-    const fileName = `${rowNo}-${safeFilePart(raw.network)}-${safeFilePart(raw.token)}-${safeFilePart(raw.date)}-${safeFilePart(raw.snapshot)}.pdf`;
+    const fileName = fileNames[i];
+    if (overwrite) await rm(join(outDir, fileName), { force: true });
     const addressHash = await addressHashForReport(raw.address);
     try {
       const request = validateRequest(raw);
@@ -367,7 +393,6 @@ async function runBatch(rt: Runtime, csvPath: string, outDir: string): Promise<n
     }
   }
 
-  const summaryPath = join(outDir, "summary.csv");
   await writeFile(summaryPath, formatCsv(summary));
   process.stderr.write(
     `${requests.length - failed} of ${requests.length} reports written, ${failed} failed. Summary: ${summaryPath}\n`,
@@ -395,6 +420,7 @@ async function main(argv: string[]): Promise<number> {
       price: { type: "string" },
       "price-source": { type: "string" },
       help: { type: "boolean" },
+      overwrite: { type: "boolean" },
     },
   });
 
@@ -422,7 +448,7 @@ async function main(argv: string[]): Promise<number> {
     const used = singleOptions.filter((o) => values[o] !== undefined);
     if (used.length) throw new UsageError(`--batch cannot be combined with --${used.join(", --")}`);
     if (!values["out-dir"]) throw new UsageError("--batch requires --out-dir");
-    return runBatch(rt, values.batch, values["out-dir"]);
+    return runBatch(rt, values.batch, values["out-dir"], values.overwrite === true);
   }
 
   if (values["out-dir"] !== undefined) throw new UsageError("--out-dir is only valid with --batch");
@@ -458,6 +484,7 @@ async function main(argv: string[]): Promise<number> {
       currency: currency!,
     },
     values.out!,
+    values.overwrite === true,
   );
 }
 
