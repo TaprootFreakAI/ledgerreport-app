@@ -255,7 +255,9 @@ async function findEvmBlockByTimestamp(
 
   // No block at or before the target: the date lies before the chain's
   // genesis. Falling back to any block would report another day's balance.
-  if (bestBlock === undefined) {
+  // Some chains (Ethereum, Arbitrum) give their genesis block timestamp 0,
+  // so it matches any date; such a block 0 does not mean the chain existed.
+  if (bestBlock === undefined || (bestBlock === 0 && (await getEvmBlockTimestamp(rt, blockchain, 0)) === 0)) {
     throw new Error(`Date is before ${blockchainLabel(blockchain)} existed`);
   }
 
