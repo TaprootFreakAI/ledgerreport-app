@@ -12,6 +12,7 @@ import { formatTokenAmount } from "../utils/formatNumber";
 import { END_OF_DAY_NOT_REACHED_MESSAGE, snapshotTimestamp } from "../utils/snapshot";
 import { cacheKey } from "../utils/cacheKey";
 import { blockchainLabel } from "../utils/blockchainLabel";
+import { canonicalBitcoinAddress, isBech32MainnetForm } from "../utils/bitcoinAddress";
 import type { Runtime } from "./runtime";
 
 // Balance lookup for one asset/address at the snapshot instant of a date.
@@ -516,12 +517,25 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
       previousHeight = height;
       if (height <= targetHeight) return finish();
 
+      // Every TX Esplora lists under /address/{a}/txs pays to or spends
+      // from that address, so at least one output or spent prevout must
+      // carry it. A TX touching neither is a provable inconsistency (e.g. an
+      // address spelled differently than Esplora returns it) and would
+      // otherwise silently count as 0, i.e. today's balance for a past date.
+      let touchesAddress = false;
       for (const out of tx.vout) {
-        if (out.address === walletAddress) net += out.value;
+        if (out.address === walletAddress) {
+          net += out.value;
+          touchesAddress = true;
+        }
       }
       for (const prev of tx.prevouts) {
-        if (prev.address === walletAddress) net -= prev.value;
+        if (prev.address === walletAddress) {
+          net -= prev.value;
+          touchesAddress = true;
+        }
       }
+      if (!touchesAddress) throw new Error(INVALID_HISTORY);
     }
 
     if (page.length < ESPLORA_PAGE_SIZE) return finish();
@@ -531,9 +545,22 @@ async function netSatsAfterHeight(rt: Runtime, walletAddress: string, targetHeig
 
 async function fetchBitcoinBalance(
   rt: Runtime,
-  walletAddress: string,
+  enteredAddress: string,
   targetTimestamp: number,
 ): Promise<BalanceAtBlock> {
+  // Bech32 is case-insensitive but mixed case is invalid (BIP-173); reject it
+  // explicitly instead of relying on the validator. All-uppercase bech32 is
+  // lowercased, the spelling Esplora returns, and this one value is used for
+  // the totals URL, the history URLs and every comparison below, so the two
+  // terms of the balance can never disagree. Base58 stays as entered.
+  if (
+    isBech32MainnetForm(enteredAddress) &&
+    enteredAddress !== enteredAddress.toLowerCase() &&
+    enteredAddress !== enteredAddress.toUpperCase()
+  ) {
+    throw new Error("Invalid Bitcoin address");
+  }
+  const walletAddress = canonicalBitcoinAddress(enteredAddress);
   if (!isValidBtcAddress(walletAddress, BtcNetwork.mainnet)) {
     throw new Error("Invalid Bitcoin address");
   }

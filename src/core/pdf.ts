@@ -3,6 +3,7 @@ import type { Blockchain, Currency, Snapshot } from "../types";
 import { formatSwissNumber } from "../utils/formatNumber";
 import { blockchainLabel } from "../utils/blockchainLabel";
 import { snapshotDescription } from "../utils/snapshot";
+import { canonicalBitcoinAddress } from "../utils/bitcoinAddress";
 import { brandSvgs, drawSvg } from "./logo";
 import type { PriceCurrency, PriceQuote } from "./price";
 
@@ -30,8 +31,14 @@ export function reportPriceFromQuote(quote: PriceQuote, currency: Currency): Rep
 
 // The report never shows the plain address, only the first 16 hex chars of
 // its SHA-256 — intentional, for privacy. The CLI summary uses the same value.
+// An all-uppercase bech32 address is hashed in its lowercase form, so both
+// spellings of one wallet give the same hash; lowercase bech32 (the usual
+// spelling), Base58 and EVM addresses are hashed exactly as entered.
 export async function addressHashForReport(address: string): Promise<string> {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(address));
+  const hashBuffer = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonicalBitcoinAddress(address)),
+  );
   return Array.from(new Uint8Array(hashBuffer))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
