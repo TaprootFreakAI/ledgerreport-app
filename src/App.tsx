@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { useSearchParams } from "react-router-dom";
 
@@ -15,6 +15,7 @@ import { LoadingSpinner } from "./components/LoadingSpinner";
 import { useWalletBalance } from "./hooks/useWalletBalance";
 import { useCurrencyPrice } from "./hooks/useCurrencyPrice";
 import { generateWalletBalancePDF } from "./utils/pdfGenerator";
+import { StaleRequestError } from "./hooks/staleRequest";
 import { fetchAssetMap, pickNativeAsset, type AssetMap } from "./core/assets";
 import { blockchainLabel } from "./utils/blockchainLabel";
 import {
@@ -64,6 +65,13 @@ export default function App() {
   // field update, but an invalid `?snapshot=` must stay visible until the
   // user explicitly picks Start of day or End of day.
   const [snapshotParamError, setSnapshotParamError] = useState<string | undefined>();
+  // The form values of the request whose balance and price are shown. The
+  // PDF and the result panel use these, never the live form, so they always
+  // describe one and the same request; only the currency stays live.
+  const [submittedRequest, setSubmittedRequest] = useState<FormData | null>(null);
+  // Number of the latest submit; a form change bumps it, so an older
+  // request stops before its price lookup and never reports an error.
+  const latestSubmit = useRef(0);
 
   // Section-heading IDs let us bind each form control to its label via
   // aria-labelledby — keyboard and screen-reader users get a proper
@@ -127,6 +135,8 @@ export default function App() {
         return;
       }
       setError(undefined);
+      latestSubmit.current++;
+      setSubmittedRequest(null);
       reset();
       resetPrice();
     });
@@ -263,7 +273,11 @@ export default function App() {
   }, [assetMap, selectedNetwork, selectedAsset, urlParams]);
 
   async function onSubmit(data: FormData) {
+    const submit = ++latestSubmit.current;
     setError(undefined);
+    // Invalidate a price lookup of an earlier submit that may still run.
+    resetPrice();
+    setSubmittedRequest(data);
     const { date, snapshot, address, network, asset } = data;
 
     try {
@@ -273,6 +287,7 @@ export default function App() {
         timestamp: date,
         snapshot,
       });
+      if (submit !== latestSubmit.current) return;
 
       await fetchPrice({
         asset,
@@ -282,15 +297,19 @@ export default function App() {
         blockNumber,
       });
     } catch (e) {
+      // A superseded submit stops quietly; its error belongs to old input.
+      if (e instanceof StaleRequestError || submit !== latestSubmit.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }
 
   const generatePDF = async () => {
     try {
-      const formData = watch();
+      if (!submittedRequest) {
+        throw new Error("Fetch the balance and price before generating the PDF.");
+      }
       await generateWalletBalancePDF({
-        formData,
+        formData: submittedRequest,
         balance,
         prices,
         selectedCurrency,
@@ -397,7 +416,7 @@ export default function App() {
 
             <div className="px-5 pb-5">
               <OutputPanel
-                tokenName={selectedAsset?.name ?? ""}
+                tokenName={submittedRequest ? submittedRequest.asset.name : (selectedAsset?.name ?? "")}
                 balance={balance}
                 prices={prices}
                 currency={selectedCurrency}
