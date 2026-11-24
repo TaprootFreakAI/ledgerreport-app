@@ -114,9 +114,10 @@ Bitcoin,BTC,,bc1q...,2025-12-31,end,CHF
 When the historical price is unavailable the report fails. A failed row gets no PDF,
 is marked `failed` in `summary.csv`, and the run exits with code 1 (2 for
 usage errors). CoinGecko requests are spaced by `--price-interval-ms`
-(default 6000) and retried on HTTP 429; a coin id and its price are
-fetched once per run even when several chains share them; set `COINGECKO_DEMO_API_KEY` for a
-higher limit. Bitcoin balances read only the transactions after the
+(default 6000) and retried on HTTP 429; per run, a token's coin id is
+looked up once per chain and contract, and a price once per coin id and
+day, even when several chains share the coin; set
+`COINGECKO_DEMO_API_KEY` for a higher limit. Bitcoin balances read only the transactions after the
 snapshot block (current confirmed totals minus everything newer), with
 paced page requests and retries on HTTP 429, 502, 503 and 504; a history that cannot be
 read completely is an error, never a partial balance. Alchemy calls are
