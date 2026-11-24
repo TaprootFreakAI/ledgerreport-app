@@ -34,8 +34,17 @@ export const useCurrencyPrice = () => {
     }
   }, []);
 
+  // Price errors are a normal outcome (not published yet, token unknown to
+  // CoinGecko, outside its 365-day window). The form clears them on change
+  // so the user can retry: reset() for fields that invalidate the price,
+  // clearError() for the currency toggle, which keeps the fetched prices.
+  const reset = useCallback(() => setResult({ prices: null, loading: false, error: null }), []);
+  const clearError = useCallback(() => setResult((current) => ({ ...current, error: null })), []);
+
   return {
     ...result,
     fetchPrice,
+    reset,
+    clearError,
   };
 };

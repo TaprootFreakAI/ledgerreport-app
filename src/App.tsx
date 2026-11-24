@@ -79,7 +79,14 @@ export default function App() {
   const [urlParams] = useSearchParams();
 
   const { balance, loading: balanceLoading, error: balanceError, fetchBalance, reset } = useWalletBalance();
-  const { prices, loading: priceLoading, error: priceError, fetchPrice } = useCurrencyPrice();
+  const {
+    prices,
+    loading: priceLoading,
+    error: priceError,
+    fetchPrice,
+    reset: resetPrice,
+    clearError: clearPriceError,
+  } = useCurrencyPrice();
 
   const {
     register,
@@ -108,20 +115,23 @@ export default function App() {
   // Currency changes are a special case: switching CHF/EUR/USD re-renders
   // the fiat line from the already-fetched `prices` state, so wiping the
   // balance would force the user to re-fetch for no reason. But we still
-  // clear the error — an error from a previous fetch attempt shouldn't
+  // clear the errors — an error from a previous fetch attempt shouldn't
   // stay stuck once the user touches the form again, even via the currency
-  // toggle.
+  // toggle. A price error disables submit, so it must be cleared here too,
+  // otherwise the user could not retry without reloading the page.
   useEffect(() => {
     const subscription = watch((_value, { name }) => {
       if (name === "currency") {
         setError(undefined);
+        clearPriceError();
         return;
       }
       setError(undefined);
       reset();
+      resetPrice();
     });
     return () => subscription.unsubscribe();
-  }, [watch, reset]);
+  }, [watch, reset, resetPrice, clearPriceError]);
 
   const selectedNetwork = watch("network");
   const selectedAsset = watch("asset");
