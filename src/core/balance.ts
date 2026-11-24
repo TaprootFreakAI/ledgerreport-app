@@ -35,7 +35,7 @@ export interface BalanceAtBlock {
 const evmRpcHost: Record<EvmBlockchain, string> = {
   [EvmBlockchain.ETH]: "eth-mainnet",
   [EvmBlockchain.POLYGON]: "polygon-mainnet",
-  [EvmBlockchain.BSC]: "bsc-mainnet",
+  [EvmBlockchain.BSC]: "bnb-mainnet",
   [EvmBlockchain.ARB]: "arb-mainnet",
   [EvmBlockchain.OPT]: "opt-mainnet",
   [EvmBlockchain.BASE]: "base-mainnet",
